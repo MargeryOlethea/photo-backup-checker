@@ -42,6 +42,12 @@ public struct PhoneItem: Hashable, Sendable, Codable {
         items.filter { !$0.isEditedRender } + items.filter(\.isEditedRender)
     }
 
+    /// Short file type for the grid: HEIC, JPG, PNG, MOV…
+    public var formatLabel: String {
+        let e = ext.uppercased()
+        return e == "JPEG" ? "JPG" : e.isEmpty ? "?" : e
+    }
+
     public var folder: String { (id as NSString).deletingLastPathComponent }
     public var ext: String { (name as NSString).pathExtension }
 }

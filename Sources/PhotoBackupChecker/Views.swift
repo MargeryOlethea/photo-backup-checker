@@ -4,6 +4,12 @@ import AVKit
 import Core
 
 private func gb(_ b: Int64) -> String { ByteCountFormatter.string(fromByteCount: b, countStyle: .file) }
+private func mp(_ w: Int?, _ h: Int?) -> String? {
+    guard let w, let h, w > 0, h > 0 else { return nil }
+    let m = Double(w * h) / 1_000_000
+    return String(format: m < 10 ? "%.1f MP" : "%.0f MP", m)
+}
+private enum Radius { static let card: CGFloat = 12, tile: CGFloat = 8, badge: CGFloat = 4 }
 
 private extension Status {
     var color: Color? {
@@ -11,134 +17,55 @@ private extension Status {
     }
     var label: String {
         switch self {
-        case .verified: "Backed up (exact copy on the drive)"
-        case .possible(_, let r): "Possible copy, not proven identical. \(r)"
+        case .verified: "Backed up: an exact copy is on the drive"
+        case .possible(_, let r): "Possible copy, not identical. \(r)"
         case .none: "Not backed up yet"
         }
     }
 }
 
+// MARK: - Main window
+
 struct ContentView: View {
     @Bindable var model: AppModel
-    @State private var preview: ItemBundle?
-    @State private var showBackup = false
-    @State private var confirmDelete = false
-    @State private var showReadyList = false
 
     var body: some View {
         let _ = model.phoneState
         VStack(spacing: 0) {
-            SummaryBar(model: model)
-            Divider()
+            StatusStrip(model: model)
             if model.bundles.isEmpty && model.phone.deviceName == nil {
-                placeholder("Plug in your iPhone, unlock it, and tap Trust.")
+                placeholder("iphone.gen3", "Plug in your iPhone", "Use the cable, unlock the phone and tap Trust if it asks.")
             } else if model.bundles.isEmpty && model.phone.isLocked {
-                placeholder("Unlock your iPhone to continue.")
+                placeholder("lock.iphone", "Unlock your iPhone", "The app continues as soon as the phone is unlocked.")
             } else if model.bundles.isEmpty && !model.phone.catalogReady {
-                placeholder("Reading your iPhone…", spinner: true)
+                placeholder("photo.on.rectangle.angled", "Reading your iPhone…", "This takes a few seconds.", spinner: true)
             } else {
-                toolbar
+                SummaryCards(model: model)
+                FilterBar(model: model)
                 Divider()
-                grid
+                if model.filter == .cleanup { CleanupView(model: model) } else { grid }
+                if !model.selection.isEmpty { SelectionBar(model: model) }
+            }
+            FooterView(model: model)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .navigationTitle("Photo Backup Checker")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                DevicePill(icon: "externaldrive.fill", name: "Hard disk", state: model.driveMounted ? "Connected" : "Unplugged",
+                           color: model.driveMounted ? .green : .red)
+                DevicePill(icon: "iphone", name: model.phone.deviceName ?? "iPhone", state: phoneText, color: phoneColor)
             }
         }
-        .sheet(item: $preview) { PreviewView(model: model, bundle: $0) }
-        .sheet(isPresented: $showBackup) { BackupSheet(model: model) }
-        .sheet(isPresented: $showReadyList) { ReadyToDeleteView(model: model) }
-        .confirmationDialog(deleteTitle, isPresented: $confirmDelete) {
-            Button("Delete from iPhone", role: .destructive) { model.deleteSelected() }
-        } message: {
-            Text("Every copy is checked against the drive again first. This may not go to Recently Deleted on your phone.")
+        .sheet(item: $model.sheet) { sheet in
+            switch sheet {
+            case .preview(let b): PreviewView(model: model, bundle: b, list: model.visible, onOpen: { model.sheet = .preview($0) })
+            case .backup: BackupSheet(model: model)
+            case .delete: DeleteSheet(model: model)
+            case .settle: SettleSheet(model: model)
+            case .readyList: ReadyToDeleteView(model: model)
+            }
         }
-    }
-
-    private var deleteTitle: String {
-        let s = model.deleteSummary
-        return "Delete \(s.count) item\(s.count == 1 ? "" : "s") (\(gb(s.bytes))) from your iPhone?"
-    }
-
-    private func placeholder(_ text: String, spinner: Bool = false) -> some View {
-        VStack(spacing: 12) {
-            if spinner { ProgressView() }
-            Text(text).font(.title3).foregroundStyle(.secondary)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var toolbar: some View {
-        HStack(spacing: 12) {
-            Picker("Show", selection: $model.filter) { ForEach(Filter.allCases) { Text($0.rawValue).tag($0) } }.frame(width: 230)
-            Picker("Sort", selection: $model.sort) { ForEach(SortOrder.allCases) { Text($0.rawValue).tag($0) } }.frame(width: 150)
-            Button("Select all shown") { model.selection.formUnion(model.visible.map(\.id)) }
-            Button("Clear") { model.selection = [] }.disabled(model.selection.isEmpty)
-            Spacer()
-            Text("\(model.selection.count) selected").foregroundStyle(.secondary)
-            Button("Back up selected…") { showBackup = true }.disabled(model.selection.isEmpty || model.busy)
-            if model.phone.canDelete {
-                Button("Delete selected", role: .destructive) { confirmDelete = true }
-                    .disabled(!model.selectionAllVerified || model.busy)
-                    .help(model.selectionAllVerified ? "" : "Only green (exactly backed up) items can be deleted.")
-            } else {
-                Button("Ready-to-delete list") { showReadyList = true }
-            }
-            Button("Check screenshots with Jev") { model.classifyScreenshots() }
-                .disabled(!model.hasJevKey || model.busy)
-                .help(model.hasJevKey ? "Sends only screenshots to TypeSafe's Jev." : "Add your key to use this.")
-        }
-        .padding(10)
-    }
-
-    private var grid: some View {
-        ScrollView {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], spacing: 8) {
-                ForEach(model.visible) { b in
-                    TileView(model: model, bundle: b, selected: model.selection.contains(b.id),
-                             onToggle: { if model.selection.contains(b.id) { model.selection.remove(b.id) } else { model.selection.insert(b.id) } },
-                             onOpen: { preview = b })
-                }
-            }.padding(10)
-        }
-    }
-}
-
-struct SummaryBar: View {
-    @Bindable var model: AppModel
-
-    var body: some View {
-        let s = model.summary
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 18) {
-                light("Hard disk", model.driveMounted ? "Connected" : "Unplugged", model.driveMounted ? .green : .red)
-                light("iPhone", phoneText, model.phone.deviceName == nil ? .red : model.phone.isLocked ? .orange : .green)
-                Spacer()
-            }
-            if let p = model.pause {
-                Label(p.text, systemImage: "pause.circle.fill")
-                    .font(.callout.bold()).foregroundStyle(.black)
-                    .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.orange.opacity(0.85)).clipShape(RoundedRectangle(cornerRadius: 6))
-            }
-            HStack(spacing: 18) {
-                stat(.green, "Backed up", s.verified, s.verifiedBytes)
-                stat(.orange, "Possible copy", s.possible, s.possibleBytes)
-                stat(.secondary, "Not backed up", s.none, s.noneBytes)
-                Spacer()
-                Text(model.driveMounted ? model.driveRoot.path : "Drive not found: \(model.driveRoot.path)")
-                    .font(.caption).foregroundStyle(model.driveMounted ? Color.secondary : Color.red).lineLimit(1).truncationMode(.middle)
-                Button("Change…", action: chooseDrive).disabled(model.busy)
-                Button("Check again") { model.recheck() }.disabled(model.busy || model.phone.deviceName == nil)
-            }
-            if let p = model.progress {
-                HStack {
-                    if p.total > 0 { ProgressView(value: Double(p.done), total: Double(p.total)).frame(width: 220) } else { ProgressView().controlSize(.small) }
-                    Text(p.total > 0 ? "\(p.label) — \(p.done) of \(p.total)" : p.label).font(.callout)
-                    Button("Cancel") { model.cancel() }
-                }
-            }
-            if let m = model.message { Text(m).font(.callout).foregroundStyle(.primary) }
-            Text("Shows items stored on this phone. If Optimize iPhone Storage is on, some originals are in iCloud and won't appear.")
-                .font(.caption2).foregroundStyle(.secondary)
-        }
-        .padding(10)
     }
 
     private var phoneText: String {
@@ -146,145 +73,813 @@ struct SummaryBar: View {
         if model.phone.isLocked { return "Locked" }
         return model.phone.catalogReady ? "Connected" : "Reading…"
     }
-
-    private func light(_ name: String, _ state: String, _ c: Color) -> some View {
-        HStack(spacing: 6) {
-            Circle().fill(c).frame(width: 10, height: 10)
-            Text("\(name): ").font(.callout.bold()) + Text(state).font(.callout)
-        }
+    private var phoneColor: Color {
+        model.phone.deviceName == nil ? .red : model.phone.isLocked || !model.phone.catalogReady ? .orange : .green
     }
 
-    private func stat(_ c: Color, _ title: String, _ n: Int, _ bytes: Int64) -> some View {
-        HStack(spacing: 6) {
-            RoundedRectangle(cornerRadius: 3).stroke(c, lineWidth: 3).frame(width: 14, height: 14)
-            Text("\(title): \(n) (\(gb(bytes)))").font(.callout)
+    private func placeholder(_ icon: String, _ title: String, _ detail: String, spinner: Bool = false) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: icon).font(.system(size: 56, weight: .light)).foregroundStyle(.secondary)
+            Text(title).font(.title2.weight(.semibold))
+            Text(detail).foregroundStyle(.secondary)
+            if spinner { ProgressView().padding(.top, 4) }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var grid: some View {
+        let items = model.visible
+        return Group {
+            if items.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle").font(.system(size: 40, weight: .light)).foregroundStyle(.secondary)
+                    Text("Nothing here").font(.title3.weight(.medium))
+                    Text("No items are “\(model.filter.rawValue)” right now.").foregroundStyle(.secondary)
+                    Button("Show all") { model.filter = .all }.buttonStyle(.link)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: TileView.side), spacing: 10)], spacing: 10) {
+                        ForEach(items) { b in TileView(model: model, bundle: b, list: items).reportFrame(b.id) }
+                    }
+                    .padding(14)
+                    .dragToSelect(model: model)
+                }
+            }
+        }
+    }
+}
+
+struct DevicePill: View {
+    let icon: String, name: String, state: String, color: Color
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 7, height: 7)
+            Image(systemName: icon).foregroundStyle(.secondary)
+            Text(name).fontWeight(.medium)
+            Text(state).foregroundStyle(.secondary)
+        }
+        .font(.callout)
+        .padding(.horizontal, 8)
+        .help("\(name): \(state)")
+    }
+}
+
+// MARK: - Pause / progress / message, shown only when there is something to say
+
+struct StatusStrip: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if let p = model.pause {
+                Label(p.text, systemImage: "pause.circle.fill")
+                    .font(.callout.weight(.semibold)).foregroundStyle(.black)
+                    .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange, in: RoundedRectangle(cornerRadius: Radius.card))
+            }
+            if let p = model.progress {
+                HStack(spacing: 10) {
+                    if p.total > 0 { ProgressView(value: Double(p.done), total: Double(max(p.total, 1))).frame(maxWidth: 260) }
+                    else { ProgressView().controlSize(.small) }
+                    Text(p.total > 0 ? "\(p.label) · \(p.done) of \(p.total)" : p.label).font(.callout).monospacedDigit()
+                    Spacer()
+                    Button("Stop") { model.cancel() }
+                }
+                .padding(10)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: Radius.card))
+            }
+            if let m = model.message {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "info.circle.fill").foregroundStyle(.tint)
+                    Text(m).font(.callout).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                    if m.hasPrefix("Deleted") {
+                        Button("Show list") { NSWorkspace.shared.open(model.deleteLogURL) }.buttonStyle(.link)
+                    }
+                    Button { model.message = nil } label: { Image(systemName: "xmark") }.buttonStyle(.borderless).help("Dismiss")
+                }
+                .padding(10)
+                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: Radius.card))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, model.pause == nil && model.progress == nil && model.message == nil ? 0 : 10)
+        .padding(.bottom, 2)
+    }
+}
+
+// MARK: - The three totals; each one is also a filter
+
+struct SummaryCards: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        let s = model.summary
+        let settle = model.settleCandidates.count
+        HStack(alignment: .top, spacing: 12) {
+            card(.backedUp, "checkmark.circle.fill", .green, "Backed up", s.verified, s.verifiedBytes, "Exact copy on the drive. Safe to delete from the iPhone.",
+                 action: s.verified > 0 && model.phone.canDelete ? ("Select all \(s.verified)", { model.selectAllBackedUp() }) : nil)
+            card(.possible, "questionmark.circle.fill", .orange, "Possible copy", s.possible, s.possibleBytes, "A similar file is on the drive, not identical. Not safe to delete yet.",
+                 action: settle > 0 ? ("Review \(settle)…", { model.sheet = .settle }) : nil)
+            card(.notBackedUp, "circle.dashed", .secondary, "Not backed up", s.none, s.noneBytes, "Only on the iPhone. Back these up before deleting.")
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 10)
+    }
+
+    private func card(_ f: Filter, _ icon: String, _ c: Color, _ title: String, _ n: Int, _ bytes: Int64, _ hint: String,
+                      action: (String, () -> Void)? = nil) -> some View {
+        let on = model.filter == f
+        return Button { model.filter = on ? .all : f } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: icon).foregroundStyle(c)
+                    Text(title).foregroundStyle(.secondary)
+                }
+                .font(.callout.weight(.medium))
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("\(n)").font(.system(size: 26, weight: .semibold, design: .rounded)).monospacedDigit()
+                    Text(gb(bytes)).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    if let action {
+                        Button(action.0, action: action.1).controlSize(.small).buttonStyle(.bordered).tint(c == .secondary ? .accentColor : c)
+                    }
+                }
+                Text(hint).font(.caption).foregroundStyle(.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(12)
+            .background(on ? c.opacity(0.12) : Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: Radius.card))
+            .overlay(RoundedRectangle(cornerRadius: Radius.card).strokeBorder(on ? c.opacity(0.8) : Color.primary.opacity(0.08), lineWidth: on ? 1.5 : 1))
+            .contentShape(RoundedRectangle(cornerRadius: Radius.card))
+        }
+        .buttonStyle(.plain)
+        .help(on ? "Show everything" : "Show only “\(title)”")
+    }
+}
+
+// MARK: - Filter, sort, select-all and clean-up tools
+
+struct FilterBar: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        let shown = model.visible.count
+        HStack(spacing: 12) {
+            Picker("Show", selection: $model.filter) {
+                ForEach(Filter.allCases) { Text($0.short).tag($0) }
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            Spacer(minLength: 8)
+            ViewThatFits(in: .horizontal) {
+                tools(compact: false, shown: shown)
+                tools(compact: true, shown: shown)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 8)
+    }
+
+    private func tools(compact: Bool, shown: Int) -> some View {
+        HStack(spacing: 12) {
+            Menu {
+                Picker("Sort", selection: $model.sort) { ForEach(SortOrder.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.inline)
+            } label: { Label(model.sort.rawValue, systemImage: "arrow.up.arrow.down") }
+                .menuStyle(.borderlessButton).fixedSize().help("Sort order")
+            Button { model.selection.formUnion(model.visible.map(\.id)) } label: {
+                if compact { Image(systemName: "checkmark.circle") } else { Text("Select all \(shown)") }
+            }
+            .buttonStyle(.borderless).keyboardShortcut("a", modifiers: .command)
+            .help("Select every item shown (⌘A)")
+            Menu {
+                Button("Find junk screenshots with Jev") { model.classifyScreenshots() }.disabled(!model.hasJevKey || model.busy)
+                Button("Select all but ★ in every similar group") { model.selectAllButBestEverywhere() }.disabled(model.similarGroups.isEmpty)
+                Divider()
+                Text(model.hasJevKey ? "Jev only ever sees screenshots and close calls between similar shots." : "Add your Jev key to use Jev.")
+            } label: { Label("Clean-up", systemImage: "sparkles").labelStyle(compact ? AnyLabelStyle(.iconOnly) : AnyLabelStyle(.titleAndIcon)) }
+                .menuStyle(.borderlessButton).fixedSize()
+        }
+    }
+}
+
+/// Lets a Label switch style at runtime.
+struct AnyLabelStyle: LabelStyle {
+    private let make: (Configuration) -> AnyView
+    init<S: LabelStyle>(_ s: S) { make = { AnyView(s.makeBody(configuration: $0)) } }
+    func makeBody(configuration: Configuration) -> some View { make(configuration) }
+}
+
+// MARK: - Bottom bar while something is selected
+
+struct SelectionBar: View {
+    let model: AppModel
+
+    var body: some View {
+        let mix = model.selectionBreakdown
+        let allGreen = mix.possible == 0 && mix.none == 0
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Text("\(model.selection.count) selected").font(.headline)
+                Text(gb(model.selectedBytes)).foregroundStyle(.secondary)
+                Button("Clear") { model.selection = [] }.buttonStyle(.borderless).keyboardShortcut(.escape, modifiers: [])
+                    .help("Clear the selection (Esc)")
+                Spacer()
+                Button { model.sheet = .backup } label: { Label("Back up…", systemImage: "externaldrive.badge.plus") }
+                    .buttonStyle(allGreen ? AnyButtonStyle(.bordered) : AnyButtonStyle(.borderedProminent))
+                    .keyboardShortcut("b", modifiers: .command)
+                    .disabled(model.busy).help("Copy the selected items to the drive (⌘B)")
+                if model.phone.canDelete {
+                    Button(role: .destructive) { model.sheet = .delete } label: { Label("Delete from iPhone…", systemImage: "trash") }
+                        .buttonStyle(allGreen ? AnyButtonStyle(.borderedProminent) : AnyButtonStyle(.bordered)).tint(.red)
+                        .keyboardShortcut(.delete, modifiers: .command)
+                        .disabled(model.deleteBlocker != nil).help("Delete the selected items from the iPhone (⌘⌫)")
+                } else {
+                    Button("Ready-to-delete list") { model.sheet = .readyList }
+                        .help("This iPhone doesn't allow deleting from the Mac; get a list to delete in the Photos app.")
+                }
+            }
+            HStack(spacing: 12) {
+                if mix.green > 0 { chip(.green, "\(mix.green) backed up") }
+                if mix.possible > 0 { chip(.orange, "\(mix.possible) possible copy") }
+                if mix.none > 0 { chip(.secondary, "\(mix.none) not backed up") }
+                Spacer()
+                if let why = model.deleteBlocker, model.phone.canDelete {
+                    Label(why, systemImage: "info.circle").foregroundStyle(.secondary)
+                } else {
+                    Text("Drag to select · ⇧-click for a range · ⌘A all · Esc clear").foregroundStyle(.secondary)
+                }
+            }
+            .font(.callout)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    private func chip(_ c: Color, _ t: String) -> some View {
+        HStack(spacing: 4) { Circle().fill(c).frame(width: 7, height: 7); Text(t) }
+    }
+}
+
+/// Lets a Button switch style at runtime.
+struct AnyButtonStyle: PrimitiveButtonStyle {
+    private let make: (Configuration) -> AnyView
+    init<S: PrimitiveButtonStyle>(_ s: S) { make = { AnyView(s.makeBody(configuration: $0)) } }
+    func makeBody(configuration: Configuration) -> some View { make(configuration) }
+}
+
+// MARK: - Delete sheet: green items are re-checked; anything else needs an explicit "I understand"
+
+struct DeleteSheet: View {
+    let model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var understood = false
+    // What this sheet shows is fixed when it opens; consent covers exactly these items.
+    @State private var all: [ItemBundle] = []
+    @State private var unbacked: [ItemBundle] = []
+
+    var body: some View {
+        let green = all.filter { !unbacked.contains($0) }
+        let possible = unbacked.filter { if case .possible = model.status(of: $0) { true } else { false } }.count
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Delete \(all.count) item\(all.count == 1 ? "" : "s") (\(gb(all.reduce(0) { $0 + $1.totalSize }))) from your iPhone?", systemImage: "trash")
+                .font(.title3.weight(.semibold))
+            if !green.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("\(green.count) backed up. Each is checked against its drive copy (by fingerprint) right before it's deleted. If a check fails, that item is kept.",
+                          systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green).fixedSize(horizontal: false, vertical: true)
+                    strip(green)
+                }
+            }
+            if !unbacked.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("\(unbacked.count) \(unbacked.count == 1 ? "is" : "are") NOT backed up. \(unbacked.count == 1 ? "It" : "They") will be gone forever.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.headline).foregroundStyle(.red)
+                    if possible > 0 {
+                        Text("\(possible) of these \(possible == 1 ? "has" : "have") a similar file on the drive that isn't identical. Consider “Review possible copies” first.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    strip(unbacked)
+                    Toggle("I understand these are not backed up and can't be recovered", isOn: $understood)
+                }
+                .padding(12)
+                .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: Radius.card))
+            }
+            Text("Deleted items leave the iPhone right away and may not go to its Recently Deleted album. A list of everything deleted is kept on this Mac.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                if !unbacked.isEmpty && !green.isEmpty {
+                    Button("Delete only the \(green.count) backed up") {
+                        model.deleteSelected(ids: Set(green.map(\.id)), allowUnbacked: []); dismiss()
+                    }
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(unbacked.isEmpty ? "Delete \(all.count)" : "Delete \(all.count) forever", role: .destructive) {
+                    model.deleteSelected(ids: Set(all.map(\.id)), allowUnbacked: understood ? Set(unbacked.map(\.id)) : []); dismiss()
+                }
+                .buttonStyle(.borderedProminent).tint(.red)
+                .disabled(all.isEmpty || (!unbacked.isEmpty && !understood))
+            }
+        }
+        .padding(22)
+        .frame(width: 600)
+        .onAppear { all = model.selectedBundles; unbacked = model.selectedUnbacked }
+    }
+
+    private func strip(_ list: [ItemBundle]) -> some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 6) {
+                ForEach(list) { b in
+                    VStack(spacing: 2) {
+                        Thumb(model: model, item: b.primary, side: 60)
+                        Text(b.primary.name).font(.caption2).foregroundStyle(.secondary).lineLimit(1).frame(width: 60)
+                    }
+                }
+            }
+        }
+        .frame(height: 80)
+    }
+}
+
+/// A small thumbnail of one phone item.
+struct Thumb: View {
+    let model: AppModel
+    let item: PhoneItem
+    let side: CGFloat
+    @State private var image: CGImage?
+    var body: some View {
+        Group { if let image { Image(decorative: image, scale: 1).resizable().scaledToFill() } else { Rectangle().fill(.quaternary) } }
+            .frame(width: side, height: side).clipShape(RoundedRectangle(cornerRadius: 6))
+            .task(id: item.id) { image = await model.thumbnail(for: item) }
+    }
+}
+
+// MARK: - Drag across tiles to select them
+
+private struct TileFrames: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) { value.merge(nextValue()) { $1 } }
+}
+
+private extension View {
+    func reportFrame(_ id: String) -> some View {
+        background(GeometryReader { g in Color.clear.preference(key: TileFrames.self, value: [id: g.frame(in: .named("grid"))]) })
+    }
+}
+
+/// Drag a box across tiles to add them to the selection (like Finder). Only tiles on screen count;
+/// Note: no auto-scroll while dragging; ⇧-click covers ranges longer than a screen.
+private struct DragToSelect: ViewModifier {
+    let model: AppModel
+    @State private var frames: [String: CGRect] = [:]
+    @State private var rect: CGRect?
+    @State private var base: Set<String> = []
+
+    func body(content: Content) -> some View {
+        content
+            .coordinateSpace(name: "grid")
+            .onPreferenceChange(TileFrames.self) { frames = $0 }
+            .overlay(alignment: .topLeading) {
+                if let rect {
+                    Rectangle().fill(Color.accentColor.opacity(0.12))
+                        .overlay(Rectangle().strokeBorder(Color.accentColor, lineWidth: 1))
+                        .frame(width: rect.width, height: rect.height)
+                        .offset(x: rect.minX, y: rect.minY)
+                        .allowsHitTesting(false)
+                }
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8, coordinateSpace: .named("grid"))
+                    .onChanged { g in
+                        if rect == nil { base = model.selection }
+                        let r = CGRect(x: min(g.startLocation.x, g.location.x), y: min(g.startLocation.y, g.location.y),
+                                       width: abs(g.location.x - g.startLocation.x), height: abs(g.location.y - g.startLocation.y))
+                        rect = r
+                        model.selection = base.union(frames.filter { $0.value.intersects(r) }.map(\.key))
+                    }
+                    .onEnded { _ in rect = nil; model.tapBlockedUntil = Date().addingTimeInterval(0.3) }
+            )
+    }
+}
+
+extension View {
+    fileprivate func dragToSelect(model: AppModel) -> some View { modifier(DragToSelect(model: model)) }
+}
+
+// MARK: - Footer: which drive folder, when checked, check again
+
+struct FooterView: View {
+    let model: AppModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "folder").foregroundStyle(.secondary)
+            Text(model.driveMounted ? model.driveRoot.lastPathComponent : "Drive folder not found")
+                .foregroundStyle(model.driveMounted ? Color.secondary : Color.red)
+                .lineLimit(1).truncationMode(.middle)
+                .help(model.driveRoot.path)
+            Button("Change…", action: chooseDrive).buttonStyle(.link).disabled(model.busy)
+            Spacer()
+            if let t = model.lastChecked { Text("Checked \(t.formatted(date: .omitted, time: .shortened))").foregroundStyle(.secondary) }
+            Image(systemName: "icloud.slash").foregroundStyle(.secondary)
+                .help("Photos stored only in iCloud (Optimize iPhone Storage) aren't on the phone, so they aren't listed or checked.")
+            Button { model.recheck() } label: { Label("Check again", systemImage: "arrow.clockwise") }
+                .buttonStyle(.borderless)
+                .disabled(model.busy || model.phone.deviceName == nil)
+        }
+        .font(.callout)
+        .padding(.horizontal, 16).padding(.vertical, 7)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
     }
 
     private func chooseDrive() {
         let p = NSOpenPanel()
         p.canChooseDirectories = true; p.canChooseFiles = false; p.prompt = "Use this folder"
+        p.message = "Choose the folder on your drive where your photos are backed up."
         if p.runModal() == .OK, let url = p.url { model.driveRoot = url; model.recheck() }
     }
 }
 
+// MARK: - Clean-up view: similar groups with ★, duplicates, junk screenshots
+
+struct CleanupView: View {
+    let model: AppModel
+
+    var body: some View {
+        let groups = model.similarGroups
+        let dups = model.bundles.filter { model.cleanup[$0.id]?.duplicate == true }
+        let junk = model.bundles.filter { model.cleanup[$0.id]?.jev == .junk }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                if groups.isEmpty && dups.isEmpty && junk.isEmpty {
+                    Text("Nothing to clean up yet. Similar shots and duplicates show here after a check; junk screenshots after “Find junk screenshots with Jev”.")
+                        .foregroundStyle(.secondary).padding(.top, 40).frame(maxWidth: .infinity)
+                }
+                if !groups.isEmpty {
+                    HStack(alignment: .firstTextBaseline) {
+                        sectionTitle("Similar shots", "★ is the app's suggestion of the one to keep (sharp first, then faces looking good). Look before deleting.")
+                        Spacer()
+                        Button("Select all but ★ everywhere") { model.selectAllButBestEverywhere() }
+                    }
+                    ForEach(groups, id: \.first!.id) { g in groupBox(g) }
+                }
+                if !dups.isEmpty {
+                    sectionTitle("Exact duplicates", "The same photo saved more than once.")
+                    tiles(dups)
+                }
+                if !junk.isEmpty {
+                    sectionTitle("Screenshots Jev thinks are junk", nil)
+                    tiles(junk)
+                }
+            }
+            .padding(14)
+        }
+    }
+
+    private func sectionTitle(_ t: String, _ sub: String?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(t).font(.title3.weight(.semibold))
+            if let sub { Text(sub).font(.callout).foregroundStyle(.secondary) }
+        }
+    }
+
+    private func groupBox(_ g: [ItemBundle]) -> some View {
+        let best = g.first { model.cleanup[$0.id]?.best == true }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("\(g.count) similar shots").font(.headline)
+                if let best, let r = model.cleanup[best.id]?.bestReason { Text("★ \(r)").foregroundStyle(.secondary) }
+                Spacer()
+                if best != nil {
+                    Button("Select all but ★") { model.selectAllButBest(g) }.help("Select the others, keep the ★ one unselected")
+                }
+            }
+            tiles(g)
+        }
+        .padding(12)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: Radius.card))
+    }
+
+    private func tiles(_ list: [ItemBundle]) -> some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: TileView.side), spacing: 10)], alignment: .leading, spacing: 10) {
+            ForEach(list) { b in TileView(model: model, bundle: b, list: list) }
+        }
+    }
+}
+
+// MARK: - One tile
+
 struct TileView: View {
+    static let side: CGFloat = 150
     let model: AppModel
     let bundle: ItemBundle
-    let selected: Bool
-    let onToggle: () -> Void
-    let onOpen: () -> Void
+    let list: [ItemBundle]
     @State private var image: CGImage?
+    @State private var hover = false
 
     var body: some View {
         let status = model.status(of: bundle)
         let info = model.cleanup[bundle.id]
-        ZStack(alignment: .topLeading) {
+        let selected = model.selection.contains(bundle.id)
+        let shape = RoundedRectangle(cornerRadius: Radius.tile)
+        ZStack {
             Group {
                 if let image { Image(decorative: image, scale: 1).resizable().scaledToFill() }
                 else { Rectangle().fill(.quaternary) }
             }
-            .frame(width: 120, height: 120).clipped()
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(status.color ?? .clear, lineWidth: 4))
-            .contentShape(Rectangle())
-            .onTapGesture(perform: onOpen)   // click the picture: preview; selection is untouched
+            .frame(width: Self.side, height: Self.side).clipped()
+            .overlay { if selected { Color.accentColor.opacity(0.2) } }
+            .clipShape(shape)
+            .contentShape(shape)
+            // Click: preview (selection untouched). ⌘-click toggles, ⇧-click selects a range.
+            .onTapGesture {
+                guard Date() > model.tapBlockedUntil else { return }   // the end of a drag-select, not a click
+                let m = NSEvent.modifierFlags
+                if m.contains(.command) || m.contains(.shift) { model.click(bundle.id, in: list, shift: m.contains(.shift)) }
+                else { model.sheet = .preview(bundle) }
+            }
 
             VStack(alignment: .leading, spacing: 3) {
-                if bundle.kind != .single { badge(bundle.kind == .live ? "Live" : bundle.kind == .edited ? "Edited" : "Burst \(bundle.mediaMembers.count)") }
-                if info?.duplicate == true { badge("Duplicate", .red) }
-                if info?.similarGroup != nil { badge("Similar", .purple) }
-                if let v = info?.jev { badge(v == .junk ? "Probably junk" : v == .keep ? "Probably keep" : "Not sure", v == .junk ? .red : .gray) }
-            }.padding(6)
-
-            if let d = bundle.primary.duration {
-                Text(String(format: "%d:%02d", Int(d) / 60, Int(d) % 60)).font(.caption2.bold()).padding(3)
-                    .background(.black.opacity(0.6)).foregroundStyle(.white).clipShape(RoundedRectangle(cornerRadius: 3))
-                    .frame(width: 120, height: 120, alignment: .bottomTrailing).padding(-2)
+                if info?.best == true { pill("★ Best", fill: .yellow, text: .black).help(info?.bestReason ?? "Best of its similar shots") }
+                HStack(spacing: 3) {
+                    pill(bundle.primary.formatLabel)
+                    if bundle.kind == .live { pill("Live") }
+                    if bundle.kind == .burst { pill("Burst \(bundle.mediaMembers.count)") }
+                }
+                if info?.duplicate == true { pill("Duplicate") }
+                if info?.similarGroup != nil && info?.best != true { pill("Similar") }
+                if let v = info?.jev { pill(v == .junk ? "Probably junk" : v == .keep ? "Probably keep" : "Jev not sure") }
             }
-            Button(action: onToggle) {
+            .padding(6)
+            .frame(width: Self.side, height: Self.side, alignment: .topLeading)
+            .allowsHitTesting(false)
+
+            HStack(spacing: 4) {
+                statusIcon(status)
+                Spacer()
+                if let d = bundle.primary.duration {
+                    Text(String(format: "%d:%02d", Int(d) / 60, Int(d) % 60)).font(.caption2.weight(.bold)).monospacedDigit()
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(.black.opacity(0.6), in: Capsule()).foregroundStyle(.white)
+                }
+            }
+            .padding(6)
+            .frame(width: Self.side, height: Self.side, alignment: .bottom)
+            .allowsHitTesting(false)
+
+            Button { model.click(bundle.id, in: list, shift: NSEvent.modifierFlags.contains(.shift)) } label: {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.title2)
-                    .foregroundStyle(selected ? Color.white : Color.white, selected ? Color.blue : Color.black.opacity(0.35))
-                    .shadow(radius: 1)
+                    .font(.system(size: 20, weight: .medium))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(Color.white, selected ? Color.accentColor : Color.clear)
+                    .background(Circle().fill(selected ? Color.clear : Color.black.opacity(0.25)))
+                    .shadow(color: .black.opacity(0.45), radius: 1.5)
                     .padding(6)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help(selected ? "Unselect" : "Select")
-            .frame(width: 120, height: 120, alignment: .topTrailing)
+            .frame(width: Self.side, height: Self.side, alignment: .topTrailing)
         }
-        .frame(width: 120, height: 120)
-        .help("\(bundle.primary.name) — \(status.label)")
+        .frame(width: Self.side, height: Self.side)
+        .overlay(shape.strokeBorder(selected ? Color.accentColor : (status.color ?? .clear).opacity(0.9), lineWidth: selected ? 3 : 2))
+        .scaleEffect(hover ? 1.02 : 1)
+        .animation(.easeOut(duration: 0.12), value: hover)
+        .onHover { hover = $0 }
+        .help([bundle.primary.name, bundle.primary.captureDate?.formatted(date: .abbreviated, time: .shortened), gb(bundle.totalSize), status.label]
+            .compactMap { $0 }.joined(separator: " · "))
         .task(id: bundle.id) { image = await model.thumbnail(for: bundle.primary) }
     }
 
-    private func badge(_ t: String, _ c: Color = .black) -> some View {
-        Text(t).font(.caption2.bold()).padding(.horizontal, 4).padding(.vertical, 1)
-            .background(c.opacity(0.7)).foregroundStyle(.white).clipShape(RoundedRectangle(cornerRadius: 3))
+    @ViewBuilder private func statusIcon(_ s: Status) -> some View {
+        switch s {
+        case .verified: tag("checkmark", .green)
+        case .possible: tag("questionmark", .orange)
+        case .none: EmptyView()
+        }
+    }
+
+    private func tag(_ symbol: String, _ c: Color) -> some View {
+        Image(systemName: symbol).font(.system(size: 9, weight: .heavy)).foregroundStyle(.white)
+            .frame(width: 17, height: 17).background(c, in: Circle())
+            .overlay(Circle().strokeBorder(.white.opacity(0.85), lineWidth: 1))
+    }
+
+    private func pill(_ t: String, fill: Color = .black.opacity(0.55), text: Color = .white) -> some View {
+        Text(t).font(.system(size: 10, weight: .semibold)).padding(.horizontal, 5).padding(.vertical, 2)
+            .background(fill, in: RoundedRectangle(cornerRadius: Radius.badge))
+            .foregroundStyle(text)
     }
 }
+
+// MARK: - Preview, with previous/next and select
 
 struct PreviewView: View {
     let model: AppModel
     let bundle: ItemBundle
+    let list: [ItemBundle]
+    let onOpen: (ItemBundle) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var file: URL?
     @State private var error: String?
 
     var body: some View {
-        VStack(spacing: 10) {
-            HStack {
-                Text(bundle.members.filter { !$0.isSidecar }.map(\.name).joined(separator: " + ")).font(.headline)
+        let status = model.status(of: bundle)
+        let i = list.firstIndex { $0.id == bundle.id }
+        let selected = model.selection.contains(bundle.id)
+        VStack(spacing: 12) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(bundle.members.filter { !$0.isSidecar }.map(\.name).joined(separator: " + ")).font(.headline)
+                    Text([bundle.primary.captureDate?.formatted(date: .long, time: .shortened), mp(bundle.primary.pixelWidth, bundle.primary.pixelHeight), gb(bundle.totalSize)]
+                        .compactMap { $0 }.joined(separator: " · ")).font(.callout).foregroundStyle(.secondary)
+                }
                 Spacer()
+                if let i { Text("\(i + 1) of \(list.count)").foregroundStyle(.secondary).monospacedDigit() }
+                Button { go(i, -1) } label: { Image(systemName: "chevron.left") }.keyboardShortcut(.leftArrow, modifiers: [])
+                    .disabled(i == nil || i == 0).help("Previous (←)")
+                Button { go(i, 1) } label: { Image(systemName: "chevron.right") }.keyboardShortcut(.rightArrow, modifiers: [])
+                    .disabled(i == nil || i == list.count - 1).help("Next (→)")
+                Button { if selected { model.selection.remove(bundle.id) } else { model.selection.insert(bundle.id) } } label: {
+                    Label(selected ? "Selected" : "Select", systemImage: selected ? "checkmark.circle.fill" : "circle")
+                }.keyboardShortcut(.space, modifiers: []).help("Select or unselect (space)")
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
             }
-            Text(model.status(of: bundle).label).font(.callout).foregroundStyle(model.status(of: bundle).color ?? .secondary)
+            HStack(spacing: 14) {
+                Label(status.label, systemImage: status.color == nil ? "circle.dashed" : "circle.fill")
+                    .foregroundStyle(status.color ?? .secondary)
+                if let r = model.cleanup[bundle.id]?.bestReason, model.cleanup[bundle.id]?.best == true {
+                    Label("Best of its similar shots: \(r)", systemImage: "star.fill").foregroundStyle(.yellow)
+                }
+                Spacer()
+            }
+            .font(.callout)
             Group {
                 if let file {
                     if bundle.primary.isVideo { VideoPlayer(player: AVPlayer(url: file)) }
                     else if let img = NSImage(contentsOf: file) { Image(nsImage: img).resizable().scaledToFit() }
-                    else { Text("Can't show this file.") }
-                } else if let error { Text(error).foregroundStyle(.red) }
-                else { ProgressView("Loading from iPhone…") }
-            }.frame(minWidth: 700, minHeight: 500)
+                    else { Text("Can't show this file.").foregroundStyle(.white) }
+                } else if let error { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
+                else { ProgressView("Loading from iPhone…").colorScheme(.dark) }
+            }
+            .frame(minWidth: 760, maxWidth: .infinity, minHeight: 520, maxHeight: .infinity)
+            .background(Color.black, in: RoundedRectangle(cornerRadius: Radius.tile))
         }
-        .padding()
-        .task {
+        .padding(16)
+        .task(id: bundle.id) {
+            file = nil; error = nil
             do { file = try await model.previewFile(for: bundle.primary) }
             catch { self.error = AppModel.describe(error) }
         }
+        .onChange(of: file) { old, _ in if let old { try? FileManager.default.removeItem(at: old) } }
         .onDisappear { if let file { try? FileManager.default.removeItem(at: file) } }
     }
+
+    private func go(_ i: Int?, _ step: Int) {
+        guard let i, list.indices.contains(i + step) else { return }
+        onOpen(list[i + step])
+    }
 }
+
+// MARK: - Back up sheet
 
 struct BackupSheet: View {
     let model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
+    @State private var existing: [String] = []
 
     var body: some View {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let problem = Naming.validateFolderName(name)
         let label = Naming.label(forFolder: name)
-        let existing = (try? FileManager.default.contentsOfDirectory(atPath: model.driveRoot.appendingPathComponent(name.trimmingCharacters(in: .whitespacesAndNewlines)).path)) ?? []
         let first = Naming.nextNumbers(count: 1, label: label, existing: existing)[0]
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Back up \(model.selection.count) item\(model.selection.count == 1 ? "" : "s")").font(.headline)
-            TextField("Folder name, e.g. 2026-10 Bali", text: $name).textFieldStyle(.roundedBorder).frame(width: 380)
-            if !name.isEmpty, let problem { Text(problem).foregroundStyle(.red).font(.callout) }
-            else if problem == nil {
-                Text("Saved in Memories/\(name.trimmingCharacters(in: .whitespacesAndNewlines))/ as \(Naming.fileName(label: label, number: first, ext: "HEIC")), …"
-                     + (existing.isEmpty ? "" : " (folder exists; numbering continues)"))
-                    .font(.callout).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Back up \(model.selection.count) item\(model.selection.count == 1 ? "" : "s") · \(gb(model.selectedBytes))", systemImage: "externaldrive.badge.plus")
+                .font(.title3.weight(.semibold))
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Folder name").font(.callout.weight(.medium))
+                TextField("e.g. 2026-10 Bali", text: $name).textFieldStyle(.roundedBorder).frame(width: 440)
+                    .onSubmit { if problem == nil && !label.isEmpty { start() } }
+                if label.isEmpty || trimmed.isEmpty {
+                    Text("Type a name after the date, e.g. “Bali”. Starting with the date keeps folders in order.").font(.callout).foregroundStyle(.secondary)
+                } else if let problem {
+                    Text(problem).foregroundStyle(.red).font(.callout)
+                } else {
+                    Text("Saved in \(model.driveRoot.lastPathComponent)/\(trimmed)/ as “\(Naming.fileName(label: label, number: first, ext: "HEIC"))”, …"
+                         + (existing.isEmpty ? "" : " The folder exists; numbering continues."))
+                        .font(.callout).foregroundStyle(.secondary)
+                }
             }
+            Text("Every file is checked after copying. Nothing on the drive is ever overwritten.")
+                .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Back up") { model.backup(folderName: name); dismiss() }.keyboardShortcut(.defaultAction).disabled(problem != nil)
+                Button("Back up", action: start).keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+                    .disabled(problem != nil || label.isEmpty)
+            }
+        }
+        .padding(22)
+        .onAppear { if name.isEmpty { name = model.suggestedFolderName } }
+        .task(id: trimmed) {
+            existing = (try? FileManager.default.contentsOfDirectory(atPath: model.driveRoot.appendingPathComponent(trimmed).path)) ?? []
+        }
+    }
+
+    private func start() { model.backup(folderName: name); dismiss() }
+}
+
+// MARK: - Review possible copies (settle)
+
+struct SettleSheet: View {
+    let model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var chosen: Set<String> = []
+    @State private var autoPicked = false
+
+    var body: some View {
+        let rows = model.settleRows
+        let ready = rows.filter { $0.verdict == .settle }
+        let done = !rows.isEmpty && rows.allSatisfy { $0.verdict != nil }
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Review possible copies").font(.title3.weight(.semibold))
+            Text("Where the drive has a weaker copy of the same picture (for example an AirDrop JPG), replace it with the iPhone's original. The new file keeps the old name with the iPhone's format (Bali 7.JPG becomes Bali 7.HEIC) and turns green. The old copy goes to the drive's Trash; nothing is deleted outright.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if rows.isEmpty {
+                ProgressView("Comparing…").frame(maxWidth: .infinity, minHeight: 200)
+            } else {
+                List(rows) { r in row(r) }.frame(minWidth: 820, minHeight: 380)
+            }
+            if done && ready.isEmpty {
+                Label("Nothing to replace: these are different photos or the drive already has the better version. Nothing will be changed.", systemImage: "checkmark.circle")
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("\(ready.count) of \(rows.count) can be replaced").foregroundStyle(.secondary)
+                if !ready.isEmpty { Button("Select all \(ready.count)") { chosen = Set(ready.map(\.id)) } }
+                Spacer()
+                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Replace \(chosen.count)") { model.settle(chosen); dismiss() }
+                    .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+                    .disabled(chosen.isEmpty || model.busy)
             }
         }
         .padding(20)
+        .task { await model.loadSettleRows() }
+        .onChange(of: done) { _, d in
+            if d && !autoPicked { autoPicked = true; chosen = Set(model.settleRows.filter { $0.verdict == .settle }.map(\.id)) }
+        }
+    }
+
+    @ViewBuilder private func row(_ r: SettleRow) -> some View {
+        HStack(spacing: 12) {
+            if r.verdict == .settle {
+                Toggle("", isOn: Binding(get: { chosen.contains(r.id) }, set: { if $0 { chosen.insert(r.id) } else { chosen.remove(r.id) } }))
+                    .labelsHidden()
+            } else { Color.clear.frame(width: 16) }
+            side("iPhone", r.phoneThumb, r.item.formatLabel, mp(r.item.pixelWidth, r.item.pixelHeight), r.item.size, r.item.name, best: r.better == .phone)
+            Image(systemName: "arrow.left").foregroundStyle(.secondary)
+            side("Drive", r.driveThumb, (r.drive.path as NSString).pathExtension.uppercased().replacingOccurrences(of: "JPEG", with: "JPG"),
+                 mp(r.drive.pixelWidth, r.drive.pixelHeight), r.drive.size,
+                 r.drive.path.replacingOccurrences(of: model.driveRoot.path + "/", with: ""), best: r.better == .drive)
+            Spacer()
+            verdict(r.verdict).lineLimit(1).frame(width: 170, alignment: .leading)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func side(_ title: String, _ img: CGImage?, _ format: String, _ pixels: String?, _ size: Int64, _ name: String, best: Bool) -> some View {
+        HStack(spacing: 8) {
+            Group {
+                if let img { Image(decorative: img, scale: 1).resizable().scaledToFill() } else { Rectangle().fill(.quaternary) }
+            }
+            .frame(width: 64, height: 64).clipShape(RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Text(title).font(.callout.weight(.semibold))
+                    if best { Text("better").font(.caption2.weight(.bold)).padding(.horizontal, 4).background(.green.opacity(0.25), in: Capsule()) }
+                }
+                Text([format, pixels, gb(size)].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                Text(name).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+            .frame(width: 200, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder private func verdict(_ v: Settle.Verdict?) -> some View {
+        switch v {
+        case nil: ProgressView().controlSize(.small)
+        case .settle?: Label("Replace", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+        case .driveBetter?: Label("Drive's is better", systemImage: "equal.circle").foregroundStyle(.secondary)
+        case .differentPhoto?: Label("Different photo", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+        }
     }
 }
+
+// MARK: - Ready-to-delete list (iPhones that don't allow deleting from the Mac)
 
 struct ReadyToDeleteView: View {
     let model: AppModel
@@ -293,8 +888,9 @@ struct ReadyToDeleteView: View {
     var body: some View {
         let ready = model.bundles.filter { Matcher.isDeletable(model.status(of: $0)) }
         VStack(alignment: .leading, spacing: 10) {
+            Text("Ready to delete").font(.title3.weight(.semibold))
             Text("This iPhone doesn't allow deleting from the Mac. These \(ready.count) items are exactly backed up; delete them in the Photos app or Image Capture.")
-                .font(.callout)
+                .font(.callout).foregroundStyle(.secondary)
             List(ready) { b in
                 HStack {
                     Text(b.members.filter { !$0.isSidecar }.map(\.name).joined(separator: ", "))
@@ -304,6 +900,6 @@ struct ReadyToDeleteView: View {
             }.frame(minWidth: 520, minHeight: 360)
             HStack { Spacer(); Button("Close") { dismiss() }.keyboardShortcut(.defaultAction) }
         }
-        .padding()
+        .padding(20)
     }
 }

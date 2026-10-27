@@ -2,6 +2,7 @@ import Foundation
 import CoreGraphics
 import ImageIO
 @preconcurrency import ImageCaptureCore
+import UniformTypeIdentifiers
 import Core
 
 struct PhoneGone: Error {}
@@ -21,6 +22,7 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
     private let browser = ICDeviceBrowser()
     private var device: ICCameraDevice?
     private var files: [String: ICCameraFile] = [:]
+    private var demoFiles: [String: URL] = [:]   // demo mode: a folder on the Mac stands in for the iPhone
 
     func start() {
         browser.delegate = self
@@ -28,10 +30,37 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
         browser.start()
     }
 
+    /// Demo mode (PBC_DEMO_PHONE): the photos in `folder` act as the iPhone's, so the app can be tried without one.
+    func startDemo(folder: URL) {
+        let fmt = DateFormatter(); fmt.dateFormat = "yyyy:MM:dd HH:mm:ss"; fmt.locale = Locale(identifier: "en_US_POSIX")
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).filter { !$0.hasPrefix(".") }.sorted()
+        items = names.reversed().map { name in
+            let url = folder.appendingPathComponent(name)
+            let props = CGImageSourceCreateWithURL(url as CFURL, nil).flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) } as? [CFString: Any]
+            let exif = props?[kCGImagePropertyExifDictionary] as? [CFString: Any]
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+            let id = "DCIM/DEMO/\(name)"
+            demoFiles[id] = url
+            return PhoneItem(id: id, name: name, size: size,
+                             captureDate: (exif?[kCGImagePropertyExifDateTimeOriginal] as? String).flatMap(fmt.date(from:)),
+                             uti: UTType(filenameExtension: url.pathExtension)?.identifier ?? "public.data",
+                             pixelWidth: props?[kCGImagePropertyPixelWidth] as? Int, pixelHeight: props?[kCGImagePropertyPixelHeight] as? Int)
+        }
+        deviceName = "Demo iPhone"; deviceID = "demo"; canDelete = true; catalogReady = true
+        changed()
+    }
+
     // MARK: reading
 
     /// The phone's own small preview image (JPEG data), or nil if it doesn't answer within 15 s.
     func thumbnailData(id: String) async -> Data? {
+        if let url = demoFiles[id] {
+            guard let img = AppModel.downscaled(url, to: 320) else { return nil }
+            let out = NSMutableData()
+            guard let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+            CGImageDestinationAddImage(dest, img, nil)
+            return CGImageDestinationFinalize(dest) ? out as Data : nil
+        }
         guard let f = files[id] else { return nil }
         nonisolated(unsafe) let file = f
         return try? await Timeout.callback(seconds: 15) { done in
@@ -41,6 +70,16 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
 
     /// Exact-length chunk reader for one phone file. Short reads and a vanished phone are errors.
     func reader(id: String, timeout: Double = 30) -> @Sendable (Int64, Int) async throws -> Data {
+        if let url = demoFiles[id] {
+            return { offset, length in
+                let h = try FileHandle(forReadingFrom: url)
+                defer { try? h.close() }
+                try h.seek(toOffset: UInt64(offset))
+                let d = try h.read(upToCount: length) ?? Data()
+                guard d.count == length else { throw ShortRead() }
+                return d
+            }
+        }
         nonisolated(unsafe) let file = files[id]
         return { offset, length in
             guard let file, file.device != nil else { throw PhoneGone() }
@@ -62,6 +101,7 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
         var out = Data(capacity: Int(item.size))
         var off: Int64 = 0
         while off < item.size {
+            try Task.checkCancellation()
             let len = Int(min(Int64(Fingerprint.chunkSize), item.size - off))
             out.append(try await read(off, len))
             off += Int64(len)
@@ -71,6 +111,11 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
 
     /// Deletes from the phone. Returns item id → nil on success, or the failure message.
     func delete(ids: [String]) async -> [String: String?] {
+        if !demoFiles.isEmpty {   // demo: drop from the list only; the sample files stay
+            items.removeAll { ids.contains($0.id) }
+            changed()
+            return Dictionary(uniqueKeysWithValues: ids.map { ($0, nil) })
+        }
         guard let device else { return Dictionary(uniqueKeysWithValues: ids.map { ($0, "iPhone disconnected") }) }
         let targets = ids.compactMap { files[$0] }
         nonisolated(unsafe) let dev = device
@@ -165,6 +210,7 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
         catalogReady = true
         isLocked = device.isAccessRestrictedAppleDevice
         canDelete = device.capabilities.contains(ICDeviceCapability.cameraDeviceCanDeleteOneFile.rawValue)
+        Diag.log("iPhone allows deleting from the Mac: \(canDelete)")
         rebuild()
         changed()
     }

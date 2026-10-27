@@ -10,13 +10,45 @@ struct CleanupInfo: Equatable {
     var similarGroup: Int?
     var jev: Jev.Verdict?
     var jevConfidence: Double?
+    var best = false                 // ★ the one to keep in its similar group
+    var bestReason: String?
     var isCandidate: Bool { duplicate || similarGroup != nil || jev == .junk }
 }
 
-enum Filter: String, CaseIterable, Identifiable { case all = "All", notBackedUp = "Not backed up", videos = "Videos", cleanup = "Possible clean-up"; var id: String { rawValue } }
+enum Filter: String, CaseIterable, Identifiable {
+    case all = "All", backedUp = "Backed up", possible = "Possible copy", notBackedUp = "Not backed up", cleanup = "Clean-up", videos = "Videos"
+    var id: String { rawValue }
+    var short: String { self == .possible ? "Possible" : rawValue }
+}
 enum SortOrder: String, CaseIterable, Identifiable { case newest = "Newest", oldest = "Oldest", largest = "Largest"; var id: String { rawValue } }
 
 struct JevResult: Codable { var verdict: Jev.Verdict; var confidence: Double }
+
+/// One possible copy offered for settling: the iPhone original against the drive copy.
+struct SettleRow: Identifiable {
+    let id: String               // bundle id
+    let item: PhoneItem
+    let drive: DriveFile
+    var phoneThumb: CGImage?
+    var driveThumb: CGImage?
+    var better: Settle.Better
+    var verdict: Settle.Verdict?   // nil while still comparing
+    var identity: Settle.Identity? // the drive file as it was when compared; settling refuses if it changed
+}
+
+/// The one sheet shown over the main window, if any.
+enum ActiveSheet: Identifiable {
+    case preview(ItemBundle), backup, delete, settle, readyList
+    var id: String {
+        switch self {
+        case .preview(let b): "preview \(b.id)"
+        case .backup: "backup"
+        case .delete: "delete"
+        case .settle: "settle"
+        case .readyList: "readyList"
+        }
+    }
+}
 
 struct Progress: Equatable { var label: String; var done: Int; var total: Int }
 
@@ -45,6 +77,9 @@ final class AppModel {
     private(set) var phoneState = 0          // bumped on every phone change so views refresh
     private(set) var checked = false
     var selection: Set<String> = []
+    var selectionAnchor: String?          // last item clicked, for shift-click ranges
+    private(set) var lastChecked: Date?
+    var sheet: ActiveSheet?
     var filter: Filter = .all
     var sort: SortOrder = .newest
     var progress: Progress?
@@ -66,6 +101,11 @@ final class AppModel {
     // Saved on the Mac between runs, keyed "id|size|date" so a different photo never reuses them.
     private var jevCache: [String: JevResult] = [:]
     private var printCache: [String: Data] = [:]        // similar-shot fingerprints (archived)
+    private var scoreCache: [String: ShotScore] = [:]   // ★ scores per photo
+    private var jevPicks: [String: String] = [:]        // close call "a‖b" → winner's key ("" = Jev unsure)
+    private(set) var settleRows: [SettleRow] = []
+    @ObservationIgnored private var settleLoad = 0       // only the latest load may write settleRows
+    @ObservationIgnored var tapBlockedUntil = Date.distantPast   // a drag just ended: don't treat it as a click
     @ObservationIgnored private var thumbMemory: [String: CGImage] = [:]
     @ObservationIgnored private var thumbOrder: [String] = []
     @ObservationIgnored private lazy var thumbStore = ThumbnailStore(dir: appData.appendingPathComponent("thumbs"))
@@ -80,22 +120,28 @@ final class AppModel {
     private var lastSave = Date()
 
     init() {
+        let env = ProcessInfo.processInfo.environment
+        let demoPhone = env["PBC_DEMO_PHONE"].map(URL.init(fileURLWithPath:))
         appData = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("PhotoBackupChecker")
+            .appendingPathComponent(demoPhone == nil ? "" : "demo")   // demo keeps its own saved data
+        if demoPhone != nil { try? FileManager.default.removeItem(at: appData) }
         try? FileManager.default.createDirectory(at: appData, withIntermediateDirectories: true)
         // Preview copies left behind by a crash or force-quit.
         for f in (try? FileManager.default.contentsOfDirectory(atPath: appData.path)) ?? [] where f.hasPrefix("preview-") {
             try? FileManager.default.removeItem(at: appData.appendingPathComponent(f))
         }
         let saved = UserDefaults.standard.string(forKey: "driveRoot")
-        let root = URL(fileURLWithPath: saved ?? "/Volumes/MARGERY/BACKUP DATA MARGERY/Memories")
+        let root = URL(fileURLWithPath: env["PBC_DEMO_DRIVE"] ?? saved ?? "/Volumes/MARGERY/BACKUP DATA MARGERY/Memories")
         driveRoot = root
         driveIndex = DriveIndex(root: root, cacheURL: appData.appendingPathComponent("drive-index.json"))
         hashCache = JSONStore.load([String: String].self, from: appData.appendingPathComponent("phone-hashes.json"))
         jevCache = JSONStore.load([String: JevResult].self, from: appData.appendingPathComponent("jev-verdicts.json"))
         printCache = JSONStore.load([String: Data].self, from: appData.appendingPathComponent("similar-prints.json"))
+        scoreCache = JSONStore.load([String: ShotScore].self, from: appData.appendingPathComponent("shot-scores.json"))
+        jevPicks = JSONStore.load([String: String].self, from: appData.appendingPathComponent("jev-picks.json"))
         badRenders = JSONStore.load([String: Date].self, from: appData.appendingPathComponent("bad-renders.json"))
         phone.onChange = { [weak self] in self?.phoneChanged() }
-        phone.start()
+        if let demoPhone { phone.startDemo(folder: demoPhone) } else { phone.start() }
         driveMounted = FileManager.default.fileExists(atPath: root.path)
         let nc = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
@@ -120,7 +166,9 @@ final class AppModel {
         let f = bundles.filter { b in
             switch filter {
             case .all: return true
-            case .notBackedUp: return !Matcher.isDeletable(status(of: b))
+            case .backedUp: return Matcher.isDeletable(status(of: b))
+            case .possible: if case .possible = status(of: b) { return true } else { return false }
+            case .notBackedUp: return status(of: b) == .none
             case .videos: return b.primary.isVideo
             case .cleanup: return cleanup[b.id]?.isCandidate == true
             }
@@ -148,7 +196,60 @@ final class AppModel {
     }
 
     var selectedBundles: [ItemBundle] { bundles.filter { selection.contains($0.id) } }
-    var selectionAllVerified: Bool { !selection.isEmpty && selectedBundles.allSatisfy { Matcher.isDeletable(status(of: $0)) } }
+    var selectedBytes: Int64 { selectedBundles.reduce(0) { $0 + $1.totalSize } }
+
+    /// Why "Delete from iPhone" can't run right now, in plain words; nil when it can.
+    var deleteBlocker: String? {
+        if selection.isEmpty { return nil }
+        if busy { return "Delete opens up when the current task finishes (or press Stop)." }
+        return nil
+    }
+
+    /// What the selection holds: backed up / possible copy / not backed up.
+    var selectionBreakdown: (green: Int, possible: Int, none: Int) {
+        var r = (green: 0, possible: 0, none: 0)
+        for b in selectedBundles {
+            switch status(of: b) { case .verified: r.green += 1; case .possible: r.possible += 1; case .none: r.none += 1 }
+        }
+        return r
+    }
+
+    /// One click from the Backed up card: show and select everything that's safe to delete.
+    func selectAllBackedUp() {
+        filter = .backedUp
+        selection = Set(bundles.filter { Matcher.isDeletable(status(of: $0)) }.map(\.id))
+    }
+
+    /// Click with ⌘ toggles one item; with ⇧ selects the range from the last clicked item in `list`.
+    func click(_ id: String, in list: [ItemBundle], shift: Bool) {
+        if shift, let a = selectionAnchor, let i = list.firstIndex(where: { $0.id == a }), let j = list.firstIndex(where: { $0.id == id }) {
+            selection.formUnion(list[min(i, j)...max(i, j)].map(\.id))
+        } else if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
+        selectionAnchor = id
+    }
+
+    /// A date-first folder name for the selection, e.g. "2026-10 ".
+    var suggestedFolderName: String {
+        guard let d = selectedBundles.compactMap(\.primary.captureDate).min() else { return "" }
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM "
+        return f.string(from: d)
+    }
+
+    /// Every similar group at once: select all but each group's ★.
+    func selectAllButBestEverywhere() { for g in similarGroups { selectAllButBest(g) } }
+
+
+    /// Similar-shot groups, each in grid order, for the clean-up view.
+    var similarGroups: [[ItemBundle]] {
+        Dictionary(grouping: bundles.filter { cleanup[$0.id]?.similarGroup != nil }) { cleanup[$0.id]!.similarGroup! }
+            .sorted { $0.key < $1.key }.map(\.value)
+    }
+
+    /// In one similar group: select every shot except the ★ one.
+    func selectAllButBest(_ group: [ItemBundle]) {
+        for b in group where cleanup[b.id]?.best != true { selection.insert(b.id) }
+        for b in group where cleanup[b.id]?.best == true { selection.remove(b.id) }
+    }
 
     // MARK: phone changes
 
@@ -168,6 +269,8 @@ final class AppModel {
             selection = selection.intersection(Set(bundles.map(\.id)))
             recomputeBundleStatuses()
         }
+        // An open preview of something that's no longer on this phone closes.
+        if case .preview(let b)? = sheet, !bundles.contains(where: { $0.id == b.id && $0 == b }) { sheet = nil }
         if !phone.isLocked && !checked && !bundles.isEmpty {
             if work == nil { checkAll() } else { autoCheckPending = true }
         }
@@ -274,7 +377,7 @@ final class AppModel {
         startWork { [weak self] in
             guard let self else { return }
             // Edited versions left waiting keep "checked" off, so the replug starts a check by itself.
-            do { self.checked = try await self.runCheck() == 0 }
+            do { self.checked = try await self.runCheck() == 0; self.lastChecked = Date() }
             catch is CancellationError { self.message = "Check stopped." }
             catch is PhoneGone { self.message = "iPhone was disconnected. Plug it back in to continue." }
             catch { self.message = "Check stopped: \(error.localizedDescription)" }
@@ -423,7 +526,64 @@ final class AppModel {
             return Cleanup.distance(x, y)
         }
         for (n, g) in groups.enumerated() { for id in g { info[id, default: CleanupInfo()].similarGroup = n } }
+        try await pickBest(groups, into: &info)
     }
+
+    /// ★ per similar group: Apple scores every photo on the Mac; Jev settles only the close calls.
+    private func pickBest(_ groups: [[String]], into info: inout [String: CleanupInfo]) async throws {
+        let byID = Dictionary(uniqueKeysWithValues: bundles.map { ($0.id, $0) })
+        let need = groups.joined().compactMap { byID[$0]?.primary }.filter { !$0.isVideo && scoreCache[deviceKey($0)] == nil }
+        for (i, item) in need.enumerated() {
+            try Task.checkCancellation()
+            progress = Progress(label: "Picking the best of similar shots", done: i, total: need.count)
+            guard let data = try await fullDataOrSkip(item), let img = Self.downscaled(data, to: 1600),
+                  let s = BestPick.score(cgImage: img) else { continue }
+            scoreCache[deviceKey(item)] = s
+            saveIfDue()
+        }
+        let key = Jev.loadKey(from: appData)
+        for g in groups {
+            let photos = g.compactMap { byID[$0] }.filter { !$0.primary.isVideo }
+            var scores: [String: ShotScore] = [:]
+            for b in photos { scores[b.id] = scoreCache[deviceKey(b.primary)] }
+            guard var pick = BestPick.pick(group: photos.map(\.id), scores: scores),
+                  let a = byID[pick.best]?.primary, let b = byID[pick.runnerUp]?.primary else { continue }
+            var byJev = false
+            if pick.closeCall, let key {
+                let k = [deviceKey(a), deviceKey(b)].sorted().joined(separator: "‖")
+                if jevPicks[k] == nil {
+                    progress = Progress(label: "Asking Jev about close calls", done: 0, total: 0)
+                    if let da = try await fullDataOrSkip(a), let db = try await fullDataOrSkip(b) {
+                        // Network trouble: ask again next time. Jev unsure: remembered as "" and Apple's pick stands.
+                        do { jevPicks[k] = try await Jev.pick(first: da, second: db, key: key).map { $0 == 0 ? deviceKey(a) : deviceKey(b) } ?? "" }
+                        catch { Diag.log("Jev pick failed: \(error)") }
+                    }
+                }
+                if jevPicks[k] == deviceKey(b) { swap(&pick.best, &pick.runnerUp) }
+                byJev = jevPicks[k]?.isEmpty == false
+            }
+            info[pick.best, default: CleanupInfo()].best = true
+            info[pick.best, default: CleanupInfo()].bestReason = byJev ? "A close call; Jev picked this one" : BestPick.reason(scores[pick.best]!)
+        }
+    }
+
+    /// A whole photo from the phone, or nil if it can't be read now (only cancelling is passed on).
+    private func fullDataOrSkip(_ item: PhoneItem) async throws -> Data? {
+        do { return try await resilient(drive: false, phone: true, maxTimeouts: 1) { try await self.phone.fullData(id: item.id) } }
+        catch is CancellationError { throw CancellationError() }
+        catch { return nil }
+    }
+
+    /// Upright image no bigger than `size` on its long side.
+    nonisolated static func downscaled(_ source: CGImageSource?, to size: Int) -> CGImage? {
+        guard let source else { return nil }
+        let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                     kCGImageSourceCreateThumbnailWithTransform: true,
+                                     kCGImageSourceThumbnailMaxPixelSize: size]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, opts as CFDictionary)
+    }
+    nonisolated static func downscaled(_ data: Data, to size: Int) -> CGImage? { downscaled(CGImageSourceCreateWithData(data as CFData, nil), to: size) }
+    nonisolated static func downscaled(_ url: URL, to size: Int) -> CGImage? { downscaled(CGImageSourceCreateWithURL(url as CFURL, nil), to: size) }
 
     private func cacheKey(_ i: PhoneItem) -> String { "\(i.id)|\(i.size)|\(i.captureDate?.timeIntervalSince1970 ?? 0)" }
     private func knownHash(_ i: PhoneItem) -> String? { sessionHashes[cacheKey(i)] ?? hashCache[cacheKey(i)] }
@@ -454,12 +614,14 @@ final class AppModel {
     private static let saveQueue = DispatchQueue(label: "PhotoBackupChecker.save", qos: .utility)
 
     private func saveHashCache() {
-        let dir = appData, hashes = hashCache, jev = jevCache, prints = printCache, bad = badRenders
+        let dir = appData, hashes = hashCache, jev = jevCache, prints = printCache, bad = badRenders, scores = scoreCache, picks = jevPicks
         Self.saveQueue.async {
             try? JSONStore.save(hashes, to: dir.appendingPathComponent("phone-hashes.json"))
             try? JSONStore.save(jev, to: dir.appendingPathComponent("jev-verdicts.json"))
             try? JSONStore.save(prints, to: dir.appendingPathComponent("similar-prints.json"))
             try? JSONStore.save(bad, to: dir.appendingPathComponent("bad-renders.json"))
+            try? JSONStore.save(scores, to: dir.appendingPathComponent("shot-scores.json"))
+            try? JSONStore.save(picks, to: dir.appendingPathComponent("jev-picks.json"))
         }
     }
 
@@ -524,21 +686,109 @@ final class AppModel {
         }
     }
 
-    // MARK: delete
+    // MARK: settle possible copies
 
-    var deleteSummary: (count: Int, bytes: Int64) {
-        let b = selectedBundles.filter { Matcher.isDeletable(status(of: $0)) }
-        return (b.count, b.reduce(0) { $0 + $1.totalSize })
+    /// Single photos whose drive match is only "possible", and whose drive file isn't the exact backup of something else.
+    var settleCandidates: [ItemBundle] {
+        let exactPaths = Set(memberStatus.values.compactMap { if case .verified(let p) = $0 { p } else { nil } })
+        return bundles.filter { b in
+            guard b.kind == .single, !b.primary.isVideo, case .possible(let p, _)? = memberStatus[b.primary.id] else { return false }
+            return !exactPaths.contains(p)
+        }
     }
 
-    func deleteSelected() {
-        guard work == nil, selectionAllVerified, phone.canDelete else { return }
+    /// Fills the settle list: both thumbnails, which is better, and whether they look like the same picture.
+    func loadSettleRows() async {
+        settleLoad += 1
+        let load = settleLoad
+        let files = Dictionary(await driveIndex.allFiles().map { ($0.path, $0) }, uniquingKeysWith: { a, _ in a })
+        settleRows = settleCandidates.compactMap { b in
+            guard case .possible(let p, _)? = memberStatus[b.primary.id], let f = files[p] else { return nil }
+            let px = { (w: Int?, h: Int?) in w.flatMap { w in h.map { w * $0 } } }
+            return SettleRow(id: b.id, item: b.primary, drive: f,
+                             better: Settle.better(phonePixels: px(b.primary.pixelWidth, b.primary.pixelHeight), phoneSize: b.primary.size,
+                                                   drivePixels: px(f.pixelWidth, f.pixelHeight), driveSize: f.size))
+        }
+        for i in settleRows.indices {
+            guard !Task.isCancelled, load == settleLoad, i < settleRows.count else { return }
+            let r = settleRows[i]
+            var phoneImg: CGImage?
+            var thumbData = thumbStore.data(for: deviceKey(r.item))
+            if thumbData == nil { thumbData = await phone.thumbnailData(id: r.item.id) }
+            if let d = thumbData { phoneImg = Self.downscaled(d, to: 320) }
+            let driveURL = URL(fileURLWithPath: r.drive.path)
+            let identity = try? Settle.identity(of: driveURL)
+            let driveImg = await Task.detached { Self.downscaled(driveURL, to: 320) }.value
+            let difference = phoneImg.flatMap { x in driveImg.flatMap { Settle.pixelDifference(x, $0) } }
+            guard load == settleLoad, i < settleRows.count, settleRows[i].id == r.id, settleRows[i].drive.path == r.drive.path else { return }
+            settleRows[i].identity = identity
+            settleRows[i].phoneThumb = phoneImg
+            settleRows[i].driveThumb = driveImg
+            settleRows[i].verdict = Settle.verdict(difference: difference, better: r.better)
+        }
+    }
+
+    /// Puts each chosen iPhone original on the drive in place of its lesser copy; the old copy goes to the drive's Trash.
+    func settle(_ ids: Set<String>) {
+        guard work == nil else { return }
         guard driveAvailable else { message = "Backup drive not found. Plug it in first."; return }
-        let chosen = selectedBundles
+        // Only rows whose drive match is still the one compared (a re-check may have moved on since).
+        let rows = settleRows.filter { r in
+            guard ids.contains(r.id), r.verdict == .settle, r.identity != nil,
+                  case .possible(let p, _)? = memberStatus[r.item.id] else { return false }
+            return p == r.drive.path
+        }
         startWork { [weak self] in
             guard let self else { return }
-            var deleted = 0, refused = 0
+            var done = 0, keptBoth = 0
+            do {
+                for (i, r) in rows.enumerated() {
+                    try Task.checkCancellation()
+                    self.progress = Progress(label: "Settling possible copies", done: i, total: rows.count)
+                    let out = try await self.resilient(drive: true, phone: true) {
+                        let job = CopyJob(item: r.item, destName: r.item.name, bundleID: r.id, bundleMembers: [r.item.name], read: self.phone.reader(id: r.item.id))
+                        return try await Settle.replace(job, old: URL(fileURLWithPath: r.drive.path), expect: r.identity)
+                    }
+                    self.sessionHashes[self.cacheKey(r.item)] = out.receipt.sha256
+                    self.hashCache[self.cacheKey(r.item)] = out.receipt.sha256
+                    self.memberStatus[r.item.id] = .verified(drivePath: out.finalPath)
+                    self.settleRows.removeAll { $0.id == r.id }
+                    done += 1
+                    if !out.oldTrashed { keptBoth += 1 }
+                }
+                self.message = "Settled \(done) photo\(done == 1 ? "" : "s"): the iPhone originals are on the drive and now green."
+                    + (done > keptBoth ? " Old copies are in the drive's Trash." : "")
+                    + (keptBoth > 0 ? " \(keptBoth) old cop\(keptBoth == 1 ? "y" : "ies") couldn't go to the Trash, so both were kept." : "")
+            } catch {
+                self.message = "Settling stopped after \(done) photo(s): \(Self.describe(error))"
+            }
+            self.recomputeBundleStatuses()
+            self.saveHashCache()
+            _ = try? await self.driveIndex.scan { _, _ in }
+            try? await self.driveIndex.save()
+        }
+    }
+
+    // MARK: delete
+
+    /// Selected items with no exact copy on the drive: deleting them loses them for good.
+    var selectedUnbacked: [ItemBundle] { selectedBundles.filter { !Matcher.isDeletable(status(of: $0)) } }
+
+    /// Green items are checked against the drive again, one at a time, right before each delete.
+    /// Items that aren't green are deleted only with `includeUnbacked`, which the person ticks knowingly.
+    /// `ids` and `allowUnbacked` are exactly what the delete sheet showed: anything that stopped being green since,
+    /// without being in `allowUnbacked`, is kept.
+    func deleteSelected(ids: Set<String>, allowUnbacked: Set<String>) {
+        guard work == nil, phone.canDelete, !ids.isEmpty else { return }
+        let chosenNow = bundles.filter { ids.contains($0.id) }
+        let green = chosenNow.filter { Matcher.isDeletable(status(of: $0)) }
+        let others = chosenNow.filter { !Matcher.isDeletable(status(of: $0)) && allowUnbacked.contains($0.id) }
+        guard green.isEmpty || driveAvailable else { message = "Backup drive not found. Plug it in first, or unselect the green items."; return }
+        startWork { [weak self] in
+            guard let self else { return }
+            var deleted = 0, deletedUnbacked = 0, refused = 0
             var kept: [String] = []
+            let chosen = green
             do {
                 let media = chosen.flatMap(\.mediaMembers)
                 for (i, m) in media.enumerated() where self.sessionHashes[self.cacheKey(m)] == nil {
@@ -560,7 +810,14 @@ final class AppModel {
                     try Task.checkCancellation()
                     guard self.phone.deviceName != nil else { throw PhoneGone() }
                     let results = await self.phone.delete(ids: b.members.map(\.id))
-                    if b.members.allSatisfy({ results[$0.id] == .some(nil) }) { deleted += 1 } else { refused += 1 }
+                    if b.members.allSatisfy({ results[$0.id] == .some(nil) }) { deleted += 1; self.logDeleted(b, backedUpAt: paths.values.sorted().first) } else { refused += 1 }
+                }
+                for (i, b) in others.enumerated() {
+                    try Task.checkCancellation()
+                    self.progress = Progress(label: "Deleting items that aren't backed up", done: i, total: others.count)
+                    guard self.phone.deviceName != nil else { throw PhoneGone() }
+                    let results = await self.phone.delete(ids: b.members.map(\.id))
+                    if b.members.allSatisfy({ results[$0.id] == .some(nil) }) { deletedUnbacked += 1; self.logDeleted(b, backedUpAt: nil) } else { refused += 1 }
                 }
                 self.selection = []
             } catch is CancellationError {
@@ -570,12 +827,22 @@ final class AppModel {
             } catch {
                 kept.append(Self.describe(error))
             }
-            var lines = ["Deleted \(deleted) item(s) from your iPhone."]
+            var lines = ["Deleted \(deleted + deletedUnbacked) item(s) from your iPhone" + (deletedUnbacked > 0 ? " (\(deletedUnbacked) weren't backed up)." : ".")]
             if refused > 0 { lines.append("iPhone didn't delete \(refused).") }
             if !kept.isEmpty { lines.append("Kept some: " + kept.prefix(3).joined(separator: "; ")) }
             self.message = lines.joined(separator: " ")
             self.saveHashCache()
         }
+    }
+
+    /// A plain record of every delete, kept on the Mac: when, which files, and whether a backup existed.
+    var deleteLogURL: URL { appData.appendingPathComponent("deleted-from-iphone.txt") }
+    /// `backedUpAt` is captured before the delete: afterwards the item is gone and has no status.
+    private func logDeleted(_ b: ItemBundle, backedUpAt path: String?) {
+        let where_ = path.map { "backed up at \($0)" } ?? "NOT backed up"
+        let line = "\(Date().formatted(.iso8601))\t\(b.members.map(\.name).joined(separator: " + "))\t\(where_)\n"
+        if let h = try? FileHandle(forWritingTo: deleteLogURL) { _ = try? h.seekToEnd(); try? h.write(contentsOf: Data(line.utf8)); try? h.close() }
+        else { try? Data(line.utf8).write(to: deleteLogURL) }
     }
 
     // MARK: Jev

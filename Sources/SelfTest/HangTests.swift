@@ -9,6 +9,7 @@ func hangTests() {
     let order = PhoneItem.storedFirst([p("IMG_E0001.HEIC"), p("IMG_0002.HEIC"), p("IMG_E0003.JPG"), p("IMG_0004.MOV")]).map(\.name)
     check(order == ["IMG_0002.HEIC", "IMG_0004.MOV", "IMG_E0001.HEIC", "IMG_E0003.JPG"], "edited versions are read last, order kept (got \(order))")
 
+    check(p("IMG_E1.HEIC").formatLabel == "HEIC" && p("a.jpeg").formatLabel == "JPG" && p("a.jpg").formatLabel == "JPG", "format label: HEIC / JPG")
     var h = HangTracker()
     check(h.shouldRead(p("IMG_E1.JPG")), "edited versions are read while the phone still makes them")
     check(!h.timedOut(p("IMG_E1168.JPG")), "an edited version hanging never counts as a stuck phone")

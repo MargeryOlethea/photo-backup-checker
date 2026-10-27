@@ -2,8 +2,8 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-/// TypeSafe's Jev model, asked one question per screenshot: junk, keep, or unsure.
-/// Only screenshots are ever sent; everything else stays on the Mac.
+/// TypeSafe's Jev model. Asked about screenshots (junk, keep, or unsure), and, for similar shots Apple
+/// can't separate, which of the two is the better keeper. Nothing else leaves the Mac.
 public enum Jev {
     public enum Verdict: String, Codable, Sendable { case junk, keep, unsure }
     public enum JevError: Error { case tooSmall, badResponse, http(Int) }
@@ -72,15 +72,50 @@ public enum Jev {
     }
 
     public static func classify(imageData: Data, key: String, session: URLSession = .shared) async throws -> (Verdict, Double) {
+        try verdict(fromResponse: try await post(requestBody(jpegBase64: try prepareImage(imageData).base64EncodedString()), key: key, session: session))
+    }
+
+    /// Two similar shots as the two options of one choice question.
+    public static func pickRequestBody(firstBase64: String, secondBase64: String) -> Data {
+        let a = "photo-\(UUID().uuidString)", b = "photo-\(UUID().uuidString)"
+        let body: [String: Any] = [
+            "model": "jev-latest",
+            "state": ["task": "Two photos of the same moment. Pick the one to keep."],
+            "assets": [a: ["type": "image", "format": "jpg", "data_base64": firstBase64],
+                       b: ["type": "image", "format": "jpg", "data_base64": secondBase64]],
+            "questions": ["best": [
+                "type": "choice",
+                "instructions": "Which photo is the better keeper? Sharp and not blurry matters most; then the most faces looking good: eyes open, looking at the camera, not turned away.",
+                "criteria": ["first": "This photo: \(a)", "second": "This photo: \(b)"],
+            ]],
+        ]
+        return try! JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+    }
+
+    /// 0 = first, 1 = second; nil when Jev isn't confident enough (Apple's pick stands).
+    public static func pickAnswer(fromResponse data: Data) -> Int? {
+        struct Answer: Decodable { let choice: String; let confidence: Double }
+        struct Resp: Decodable { let answers: [String: Answer] }
+        guard let a = (try? JSONDecoder().decode(Resp.self, from: data))?.answers["best"],
+              (0...1).contains(a.confidence), a.confidence >= minConfidence else { return nil }
+        return ["first": 0, "second": 1][a.choice]
+    }
+
+    public static func pick(first: Data, second: Data, key: String, session: URLSession = .shared) async throws -> Int? {
+        let body = pickRequestBody(firstBase64: try prepareImage(first).base64EncodedString(), secondBase64: try prepareImage(second).base64EncodedString())
+        return pickAnswer(fromResponse: try await post(body, key: key, session: session))
+    }
+
+    private static func post(_ body: Data, key: String, session: URLSession) async throws -> Data {
         var req = URLRequest(url: endpoint)
         req.httpMethod = "POST"
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         req.setValue("true", forHTTPHeaderField: "TypeSafe-Danger-Zone-Images")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = requestBody(jpegBase64: try prepareImage(imageData).base64EncodedString())
+        req.httpBody = body
         let (data, resp) = try await session.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else { throw JevError.http(code) }
-        return try verdict(fromResponse: data)
+        return data
     }
 }
