@@ -1,0 +1,16 @@
+import Foundation
+
+namingTests()
+await indexTests()
+matchTests()
+await writerTests()
+await deleteGateTests()
+cleanupTests()
+jevTests()
+await timeoutTests()
+await indexSafetyTests()
+await edgeTests()
+storeTests()
+await edge2Tests()
+hangTests()
+exit(runChecks())
