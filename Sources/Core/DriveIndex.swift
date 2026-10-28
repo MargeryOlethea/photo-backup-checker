@@ -25,6 +25,7 @@ public actor DriveIndex {
             throw CocoaError(.fileReadNoSuchFile)
         }
         var found: [String: DriveFile] = [:]
+        var folders: Set<URL> = [root]
         for case let url as URL in e {
             guard !url.lastPathComponent.hasPrefix("."),
                   let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true,
@@ -35,10 +36,12 @@ public actor DriveIndex {
             } else {
                 found[path] = DriveFile(path: path, size: Int64(size), modified: mod)
             }
+            folders.insert(url.deletingLastPathComponent())
             if found.count % 200 == 0 { progress(found.count, 0) }
         }
         // Unplugged part-way: the list is incomplete, so keep what we had.
         guard FileManager.default.fileExists(atPath: root.path) else { throw CocoaError(.fileReadNoSuchFile) }
+        for f in folders { Self.removeStaleStaging(in: f) }
         byPath = found
         scanned = true
         progress(found.count, found.count)
@@ -67,6 +70,20 @@ public actor DriveIndex {
             }
         }
         return Array(byPath.values)
+    }
+
+    /// Staging files are hidden and normally removed by the copy that made them. One can be left behind if the
+    /// drive is unplugged mid-copy, so any that is over an hour old is removed here. Only the app's own
+    /// ".pbc-staging-" files are ever touched.
+    public static let stagingPrefix = ".pbc-staging-"
+    static func removeStaleStaging(in folder: URL, olderThan age: TimeInterval = 3600) {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return }
+        for n in names where n.hasPrefix(stagingPrefix) {
+            let url = folder.appendingPathComponent(n)
+            guard let v = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]), v.isRegularFile == true,
+                  let m = v.contentModificationDate, Date().timeIntervalSince(m) > age else { continue }
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     public func files(withSize size: Int64) -> [DriveFile] { byPath.values.filter { $0.size == size } }

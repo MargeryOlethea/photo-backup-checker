@@ -49,8 +49,8 @@ enum Snapshot {
             case "preview": model.sheet = model.visible.first.map { .preview($0) }
             default: model.sheet = nil
             }
-        case "do-settle":   // replace every row marked "Replace"
-            model.settle(Set(model.settleRows.filter { $0.verdict == .settle }.map(\.id)))
+        case "do-settle":   // run every row with its suggested action
+            model.settle(Dictionary(uniqueKeysWithValues: model.settleRows.compactMap { r in r.action.map { (r.id, $0) } }))
         case "do-backup": model.backup(folderName: arg)
         case "do-delete":   // "green" = only backed-up selected items; "all" = with consent for the rest
             let sel = model.selectedBundles

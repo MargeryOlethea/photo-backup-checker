@@ -19,7 +19,12 @@ func jevTests() {
     check(Jev.isScreenshot(shot("public.png", 1170, 2532)), "portrait iPhone 13 PNG is a screenshot")
     check(Jev.isScreenshot(shot("public.png", 2532, 1170)), "landscape iPhone 13 PNG is a screenshot")
     check(!Jev.isScreenshot(shot("public.jpeg", 1170, 2532)), "JPEG is never a screenshot")
-    check(!Jev.isScreenshot(shot("public.png", 1080, 1920)), "other-size PNG is not a screenshot")
+    check(Jev.isScreenshot(shot("public.png", 1179, 2556)), "iPhone 15 PNG is a screenshot")
+    check(Jev.isScreenshot(shot("public.png", 1320, 2868)), "iPhone 16 Pro Max PNG is a screenshot")
+    check(Jev.isScreenshot(shot("public.png", 750, 1334)), "iPhone 8 PNG is a screenshot")
+    check(!Jev.isScreenshot(shot("public.png", 360, 780)), "tiny PNG is not a screenshot")
+    check(!Jev.isScreenshot(shot("public.png", 1000, 1500)), "other-size PNG is not a screenshot")
+    check(!Jev.isScreenshot(shot("public.png", 4032, 3024)), "camera-sized PNG is not a screenshot")
 
     let body = Jev.requestBody(jpegBase64: "AAAA")
     let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]

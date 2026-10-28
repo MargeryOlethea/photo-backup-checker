@@ -37,6 +37,34 @@ func settleTests() async {
     check(Settle.verdict(difference: 0.3, better: .phone) == .differentPhoto, "looks different: leave alone")
     check(Settle.verdict(difference: nil, better: .phone) == .differentPhoto, "couldn't compare: leave alone")
 
+    // Suggested action: never one that loses a picture
+    check(Settle.suggested(for: .settle) == .replace, "same picture, iPhone better: replace")
+    check(Settle.suggested(for: .driveBetter) == .keepBoth, "drive better: keep both")
+    check(Settle.suggested(for: .differentPhoto) == .keepBoth, "different photo: keep both, never trash")
+    check(Settle.suggested(for: .sameClip) == .keepBoth, "video matched by date and length: keep both")
+    check(Settle.alongsideName(old: URL(fileURLWithPath: "/d/Bali 03.JPG"), ext: "HEIC") == "Bali 03 (from iPhone).HEIC", "alongside name")
+    check(Settle.alongsideName(old: URL(fileURLWithPath: "/d/Bali 03"), ext: "") == "Bali 03 (from iPhone)", "alongside name without extension")
+
+    // Keep both: added next to the old file, never touching it
+    do {
+        let dir = tempDir()
+        let old = dir.appendingPathComponent("Bali 03.JPG")
+        try Data("small jpg".utf8).write(to: old)
+        let e = try await Settle.alongside(phoneJob("IMG_0003.HEIC", Data("original heic".utf8)), old: old)
+        check(e.destName == "Bali 03.HEIC" && names(dir) == ["Bali 03.HEIC", "Bali 03.JPG"], "original added with the old name and its own format (got \(names(dir)))")
+        check((try? Data(contentsOf: old)) == Data("small jpg".utf8), "old file untouched")
+        let e2 = try await Settle.alongside(phoneJob("IMG_0004.HEIC", Data("second".utf8)), old: old)
+        check(e2.destName == "Bali 03 (from iPhone).HEIC", "name taken: falls back to (from iPhone)")
+        await checkThrowsAsync("both names taken: refuses rather than overwrite") {
+            _ = try await Settle.alongside(phoneJob("IMG_0005.HEIC", Data("third".utf8)), old: old)
+        }
+        let sameExt = dir.appendingPathComponent("Bali 04.HEIC")
+        try Data("drive heic".utf8).write(to: sameExt)
+        let e3 = try await Settle.alongside(phoneJob("IMG_0006.HEIC", Data("phone heic".utf8)), old: sameExt)
+        check(e3.destName == "Bali 04 (from iPhone).HEIC" && (try? Data(contentsOf: sameExt)) == Data("drive heic".utf8), "same format: goes straight to (from iPhone)")
+        check(Set(receiptNames(dir)).isSuperset(of: ["Bali 03.HEIC", "Bali 03 (from iPhone).HEIC", "Bali 04 (from iPhone).HEIC"]), "receipt lists added files")
+    } catch { check(false, "alongside threw \(error)") }
+
     func solid(_ v: CGFloat) -> CGImage {
         let c = CGContext(data: nil, width: 40, height: 30, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0)!
         c.setFillColor(gray: v, alpha: 1); c.fill(CGRect(x: 0, y: 0, width: 40, height: 30)); return c.makeImage()!

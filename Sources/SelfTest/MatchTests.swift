@@ -44,6 +44,8 @@ func matchTests() {
 
     let wrongShape = DriveFile(path: "/d/y.JPG", size: 55, modified: d0, captureDate: d0, pixelWidth: 1000, pixelHeight: 1000, metadataRead: true)
     check(Matcher.status(item: p, phoneHash: nil, sameSize: [], candidates: [wrongShape]) == .none, "different shape is not a possible copy")
+    let liveMov = DriveFile(path: "/d/Bali 03.MOV", size: 900, modified: d0, captureDate: d0, pixelWidth: 1920, pixelHeight: 1440, duration: 2.5, metadataRead: true)
+    check(Matcher.status(item: p, phoneHash: nil, sameSize: [], candidates: [liveMov]) == .none, "a photo is never a possible copy of a video")
 
     let vid = item("IMG_0011.MOV", uti: "com.apple.quicktime-movie", dur: 10.0)
     let vidCopy = DriveFile(path: "/d/v.mp4", size: 9, modified: d0, captureDate: d0, duration: 10.6, metadataRead: true)

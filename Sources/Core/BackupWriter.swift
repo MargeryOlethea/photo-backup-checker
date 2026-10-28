@@ -99,7 +99,7 @@ public enum BackupWriter {
         let n = job.destName
         guard !n.isEmpty, !n.contains("/"), !n.contains(":"), !n.hasPrefix(".") else { throw BackupError.invalidFolder("Bad file name: \(n)") }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let staging = folder.appendingPathComponent(".pbc-staging-\(UUID().uuidString)").path
+        let staging = folder.appendingPathComponent(DriveIndex.stagingPrefix + UUID().uuidString).path
         let final = folder.appendingPathComponent(job.destName).path
 
         let fd = open(staging, O_CREAT | O_EXCL | O_WRONLY, 0o644)

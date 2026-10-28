@@ -12,7 +12,10 @@ func indexTests() async {
     try! FileManager.default.createDirectory(at: dir.appendingPathComponent("2022-09 trip"), withIntermediateDirectories: true)
     try! Data("x".utf8).write(to: dir.appendingPathComponent("2022-09 trip/c.heic"))
     try! Data("junk".utf8).write(to: dir.appendingPathComponent(".DS_Store"))
-    try! Data("staging".utf8).write(to: dir.appendingPathComponent("2022-09 trip/.pbc-staging-123"))
+    try! Data("staging".utf8).write(to: dir.appendingPathComponent("2022-09 trip/.pbc-staging-123"))   // fresh: a copy may be using it
+    let stale = dir.appendingPathComponent(".pbc-staging-old")
+    try! Data("left behind".utf8).write(to: stale)
+    try! FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-7200)], ofItemAtPath: stale.path)
 
     check(try Fingerprint.sha256(fileAt: dir.appendingPathComponent("b.mov")) == hex(b), "file hash matches CryptoKit")
     let chunked = try? await Fingerprint.sha256(readChunk: { off, len in b.subdata(in: Int(off)..<min(b.count, Int(off) + len)) }, size: Int64(b.count))
@@ -30,6 +33,9 @@ func indexTests() async {
     let idx = DriveIndex(root: dir, cacheURL: cache)
     let files = (try? await idx.scan(progress: { _, _ in })) ?? []
     check(files.count == 3, "scan finds 3 files, skips dotfiles and staging (got \(files.count))")
+    check(!FileManager.default.fileExists(atPath: stale.path), "scan removes a staging file left behind over an hour ago")
+    check(FileManager.default.fileExists(atPath: dir.appendingPathComponent("2022-09 trip/.pbc-staging-123").path), "scan keeps a fresh staging file")
+    check(FileManager.default.fileExists(atPath: dir.appendingPathComponent(".DS_Store").path), "scan never touches other hidden files")
     let hashed = (try? await idx.ensureHashes(forSizes: [Int64(a.count)])) ?? []
     check(hashed.first { $0.path.hasSuffix("a.jpg") }?.sha256 == hex(a), "hashes matching size")
     check(hashed.first { $0.path.hasSuffix("b.mov") }?.sha256 == nil, "skips non-matching size")

@@ -3,6 +3,7 @@ import AppKit
 import Observation
 import Vision
 import ImageIO
+import AVFoundation
 import Core
 
 struct CleanupInfo: Equatable {
@@ -27,12 +28,14 @@ struct JevResult: Codable { var verdict: Jev.Verdict; var confidence: Double }
 /// One possible copy offered for settling: the iPhone original against the drive copy.
 struct SettleRow: Identifiable {
     let id: String               // bundle id
-    let item: PhoneItem
+    let bundle: ItemBundle
     let drive: DriveFile
+    var item: PhoneItem { bundle.primary }
     var phoneThumb: CGImage?
     var driveThumb: CGImage?
     var better: Settle.Better
     var verdict: Settle.Verdict?   // nil while still comparing
+    var action: Settle.Action?     // what the person chose (starts as the suggestion); nil while comparing
     var identity: Settle.Identity? // the drive file as it was when compared; settling refuses if it changed
 }
 
@@ -112,6 +115,8 @@ final class AppModel {
     private var work: Task<Void, Never>?
     private var workID = 0
     private var autoCheckPending = false
+    /// The person pressed Stop: no check starts by itself until "Check again" or a replug.
+    private var stoppedByUser = false
     /// Hang bookkeeping for the current connection; a replug starts fresh.
     private var hangs = HangTracker()
     /// Edited versions (device-scoped keys) the iPhone failed to make; not asked for again.
@@ -153,7 +158,7 @@ final class AppModel {
 
     private func refreshDrive() {
         driveMounted = FileManager.default.fileExists(atPath: driveRoot.path)
-        if driveMounted && !checked && work == nil && phone.catalogReady && !phone.isLocked && !bundles.isEmpty { checkAll() }
+        if driveMounted && !checked && !stoppedByUser && work == nil && phone.catalogReady && !phone.isLocked && !bundles.isEmpty { checkAll() }
     }
 
     var hasJevKey: Bool { Jev.loadKey(from: appData) != nil }
@@ -260,18 +265,23 @@ final class AppModel {
             cancel(); checked = false; sessionHashes = [:]; memberStatus = [:]; bundleStatus = [:]; cleanup = [:]; bundles = []; selection = []
         }
         if let id = phone.deviceID { deviceID = id }
-        if phone.deviceName == nil { hangs = HangTracker() }
+        if phone.deviceName == nil { hangs = HangTracker(); stoppedByUser = false }
         // While unplugged, keep showing what we know; running work pauses and continues on replug.
         guard phone.deviceName != nil, phone.catalogReady else { return }
         let newBundles = Bundler.bundles(phone.items)
         if newBundles != bundles {
+            // A file re-made at the same path (a re-edited photo) is a different file: forget what we knew about it.
+            let oldKeys = Dictionary(bundles.flatMap(\.members).map { ($0.id, cacheKey($0)) }, uniquingKeysWith: { a, _ in a })
+            for m in newBundles.flatMap(\.members) where oldKeys[m.id] != nil && oldKeys[m.id] != cacheKey(m) { memberStatus[m.id] = nil }
+            // Photos taken (or changed) while plugged in haven't been checked: run the check again (cached work is instant).
+            if checked, newBundles.contains(where: { b in b.mediaMembers.contains { memberStatus[$0.id] == nil } }) { checked = false }
             bundles = newBundles
             selection = selection.intersection(Set(bundles.map(\.id)))
             recomputeBundleStatuses()
         }
         // An open preview of something that's no longer on this phone closes.
         if case .preview(let b)? = sheet, !bundles.contains(where: { $0.id == b.id && $0 == b }) { sheet = nil }
-        if !phone.isLocked && !checked && !bundles.isEmpty {
+        if !phone.isLocked && !checked && !stoppedByUser && !bundles.isEmpty {
             if work == nil { checkAll() } else { autoCheckPending = true }
         }
     }
@@ -299,7 +309,7 @@ final class AppModel {
         }
     }
 
-    func recheck() { checked = false; checkAll() }
+    func recheck() { checked = false; stoppedByUser = false; checkAll() }
 
     /// What currently stops work that needs the drive and/or phone, if anything.
     private func blocker(drive: Bool, phone needsPhone: Bool) -> Pause? {
@@ -378,7 +388,7 @@ final class AppModel {
             guard let self else { return }
             // Edited versions left waiting keep "checked" off, so the replug starts a check by itself.
             do { self.checked = try await self.runCheck() == 0; self.lastChecked = Date() }
-            catch is CancellationError { self.message = "Check stopped." }
+            catch is CancellationError { self.stoppedByUser = true; self.message = "Check stopped. Press “Check again” when you're ready." }
             catch is PhoneGone { self.message = "iPhone was disconnected. Plug it back in to continue." }
             catch { self.message = "Check stopped: \(error.localizedDescription)" }
             self.saveHashCache()
@@ -645,7 +655,7 @@ final class AppModel {
     // MARK: backup
 
     func backup(folderName: String) {
-        guard work == nil else { return }
+        guard work == nil else { message = "Something else is running. Wait for it to finish (or press Stop), then back up again."; return }
         guard driveAvailable else { message = "Backup drive not found. Plug it in first."; return }
         let chosen = selectedBundles
         let folder = driveRoot.appendingPathComponent(folderName.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -666,9 +676,7 @@ final class AppModel {
                         return try await BackupWriter.copy(job, into: folder)
                     }
                     entries.append(e)
-                    self.sessionHashes[self.cacheKey(p.item)] = e.sha256
-                    self.hashCache[self.cacheKey(p.item)] = e.sha256
-                    self.memberStatus[p.item.id] = .verified(drivePath: folder.appendingPathComponent(p.destName).path)
+                    self.markVerified(p.item, hash: e.sha256, path: folder.appendingPathComponent(p.destName).path)
                 }
                 self.message = "Backed up \(chosen.count) item\(chosen.count == 1 ? "" : "s") to \(folder.lastPathComponent)."
                 self.selection = []
@@ -688,16 +696,23 @@ final class AppModel {
 
     // MARK: settle possible copies
 
-    /// Single photos whose drive match is only "possible", and whose drive file isn't the exact backup of something else.
+    /// Items whose drive match is only "possible": single photos, videos and Live Photos, as long as the
+    /// drive file isn't the exact backup of something else.
     var settleCandidates: [ItemBundle] {
         let exactPaths = Set(memberStatus.values.compactMap { if case .verified(let p) = $0 { p } else { nil } })
         return bundles.filter { b in
-            guard b.kind == .single, !b.primary.isVideo, case .possible(let p, _)? = memberStatus[b.primary.id] else { return false }
+            guard b.kind == .single || b.kind == .live, case .possible(let p, _)? = memberStatus[b.primary.id] else { return false }
             return !exactPaths.contains(p)
         }
     }
 
-    /// Fills the settle list: both thumbnails, which is better, and whether they look like the same picture.
+    /// Cheap per-item check for buttons; the sheet applies the full `settleCandidates` rule.
+    func canSettle(_ b: ItemBundle) -> Bool {
+        guard b.kind == .single || b.kind == .live, case .possible? = memberStatus[b.primary.id] else { return false }
+        return true
+    }
+
+    /// Fills the settle list: both thumbnails, which is better, whether they look like the same picture, and a suggested action.
     func loadSettleRows() async {
         settleLoad += 1
         let load = settleLoad
@@ -705,7 +720,7 @@ final class AppModel {
         settleRows = settleCandidates.compactMap { b in
             guard case .possible(let p, _)? = memberStatus[b.primary.id], let f = files[p] else { return nil }
             let px = { (w: Int?, h: Int?) in w.flatMap { w in h.map { w * $0 } } }
-            return SettleRow(id: b.id, item: b.primary, drive: f,
+            return SettleRow(id: b.id, bundle: b, drive: f,
                              better: Settle.better(phonePixels: px(b.primary.pixelWidth, b.primary.pixelHeight), phoneSize: b.primary.size,
                                                    drivePixels: px(f.pixelWidth, f.pixelHeight), driveSize: f.size))
         }
@@ -718,55 +733,103 @@ final class AppModel {
             if let d = thumbData { phoneImg = Self.downscaled(d, to: 320) }
             let driveURL = URL(fileURLWithPath: r.drive.path)
             let identity = try? Settle.identity(of: driveURL)
-            let driveImg = await Task.detached { Self.downscaled(driveURL, to: 320) }.value
-            let difference = phoneImg.flatMap { x in driveImg.flatMap { Settle.pixelDifference(x, $0) } }
+            let isVideo = r.item.isVideo
+            let driveImg = await Task.detached { isVideo ? await Self.videoFrame(driveURL, to: 320) : Self.downscaled(driveURL, to: 320) }.value
+            // Videos matched on date and length aren't compared frame by frame; photos are.
+            let verdict: Settle.Verdict = isVideo ? .sameClip : Settle.verdict(difference: phoneImg.flatMap { x in driveImg.flatMap { Settle.pixelDifference(x, $0) } }, better: r.better)
             guard load == settleLoad, i < settleRows.count, settleRows[i].id == r.id, settleRows[i].drive.path == r.drive.path else { return }
             settleRows[i].identity = identity
             settleRows[i].phoneThumb = phoneImg
             settleRows[i].driveThumb = driveImg
-            settleRows[i].verdict = Settle.verdict(difference: difference, better: r.better)
+            settleRows[i].verdict = verdict
+            settleRows[i].action = Settle.suggested(for: verdict)
         }
     }
 
-    /// Puts each chosen iPhone original on the drive in place of its lesser copy; the old copy goes to the drive's Trash.
-    func settle(_ ids: Set<String>) {
-        guard work == nil else { return }
+    /// First frame of a video on the drive, for the settle list.
+    nonisolated static func videoFrame(_ url: URL, to size: Int) async -> CGImage? {
+        let gen = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        gen.appliesPreferredTrackTransform = true
+        gen.maximumSize = CGSize(width: size, height: size)
+        return try? await gen.image(at: .zero).image
+    }
+
+    /// Fixes every row that has an action. "Replace": the iPhone original takes the drive copy's place and the old copy
+    /// goes to the drive's Trash. "Keep both": the original is added next to it. Every file is verified after copying,
+    /// so the item turns green either way. Live Photo videos are added next to the photo.
+    func settle(_ actions: [String: Settle.Action]) {
+        guard work == nil else { message = "Something else is running. Wait for it to finish (or press Stop), then try again."; return }
         guard driveAvailable else { message = "Backup drive not found. Plug it in first."; return }
         // Only rows whose drive match is still the one compared (a re-check may have moved on since).
-        let rows = settleRows.filter { r in
-            guard ids.contains(r.id), r.verdict == .settle, r.identity != nil,
-                  case .possible(let p, _)? = memberStatus[r.item.id] else { return false }
-            return p == r.drive.path
+        var seenPaths = Set<String>()
+        let rows: [(SettleRow, Settle.Action)] = settleRows.compactMap { r in
+            guard let a = actions[r.id], a != .skip, r.identity != nil, case .possible(let p, _)? = memberStatus[r.item.id], p == r.drive.path else { return nil }
+            // Two iPhone photos matched to the same drive file: only the first may replace it; the rest are added next to it.
+            return (r, seenPaths.insert(p).inserted ? a : .keepBoth)
         }
         startWork { [weak self] in
             guard let self else { return }
-            var done = 0, keptBoth = 0
+            var replaced = 0, added = 0, keptBoth = 0, changed = 0
             do {
-                for (i, r) in rows.enumerated() {
+                for (i, (r, action)) in rows.enumerated() {
                     try Task.checkCancellation()
-                    self.progress = Progress(label: "Settling possible copies", done: i, total: rows.count)
-                    let out = try await self.resilient(drive: true, phone: true) {
-                        let job = CopyJob(item: r.item, destName: r.item.name, bundleID: r.id, bundleMembers: [r.item.name], read: self.phone.reader(id: r.item.id))
-                        return try await Settle.replace(job, old: URL(fileURLWithPath: r.drive.path), expect: r.identity)
+                    self.progress = Progress(label: "Fixing possible copies", done: i, total: rows.count)
+                    let old = URL(fileURLWithPath: r.drive.path)
+                    let folder = old.deletingLastPathComponent()
+                    var primaryPath = old.path
+                    if action == .replace {
+                        let out: Settle.Outcome
+                        do {
+                            out = try await self.resilient(drive: true, phone: true) {
+                                let job = CopyJob(item: r.item, destName: r.item.name, bundleID: r.id, bundleMembers: r.bundle.members.map(\.name), read: self.phone.reader(id: r.item.id))
+                                return try await Settle.replace(job, old: old, expect: r.identity)
+                            }
+                        } catch Settle.SettleError.driveFileChanged { changed += 1; continue }   // edited on the drive since it was compared: leave it
+                        primaryPath = out.finalPath
+                        self.markVerified(r.item, hash: out.receipt.sha256, path: out.finalPath)
+                        replaced += 1
+                        if !out.oldTrashed { keptBoth += 1 }
+                    } else {
+                        let e = try await self.copyAlongside(r.item, old: old, bundle: r.bundle, into: folder)
+                        primaryPath = folder.appendingPathComponent(e.destName).path
+                        self.markVerified(r.item, hash: e.sha256, path: primaryPath)
+                        added += 1
                     }
-                    self.sessionHashes[self.cacheKey(r.item)] = out.receipt.sha256
-                    self.hashCache[self.cacheKey(r.item)] = out.receipt.sha256
-                    self.memberStatus[r.item.id] = .verified(drivePath: out.finalPath)
+                    // The rest of the bundle (a Live Photo's video, an .AAE edit file) goes next to the photo, unless the drive already has that exact file.
+                    for m in r.bundle.members where m.id != r.item.id {
+                        if case .verified? = self.memberStatus[m.id] { continue }
+                        let e = try await self.copyAlongside(m, old: URL(fileURLWithPath: primaryPath), bundle: r.bundle, into: folder)
+                        self.markVerified(m, hash: e.sha256, path: folder.appendingPathComponent(e.destName).path)
+                    }
                     self.settleRows.removeAll { $0.id == r.id }
-                    done += 1
-                    if !out.oldTrashed { keptBoth += 1 }
                 }
-                self.message = "Settled \(done) photo\(done == 1 ? "" : "s"): the iPhone originals are on the drive and now green."
-                    + (done > keptBoth ? " Old copies are in the drive's Trash." : "")
-                    + (keptBoth > 0 ? " \(keptBoth) old cop\(keptBoth == 1 ? "y" : "ies") couldn't go to the Trash, so both were kept." : "")
+                var parts: [String] = []
+                if replaced > 0 { parts.append("replaced \(replaced) drive cop\(replaced == 1 ? "y" : "ies") with the iPhone original" + (replaced > keptBoth ? " (old ones are in the drive's Trash)" : "")) }
+                if added > 0 { parts.append("added \(added) iPhone original\(added == 1 ? "" : "s") next to the drive copy") }
+                if keptBoth > 0 { parts.append("\(keptBoth) old cop\(keptBoth == 1 ? "y" : "ies") couldn't go to the Trash, so both were kept") }
+                if changed > 0 { parts.append("\(changed) drive file\(changed == 1 ? "" : "s") changed since the comparison and \(changed == 1 ? "was" : "were") left alone; open Fix again to compare afresh") }
+                self.message = parts.isEmpty ? "Nothing to fix." : "Fixed: " + parts.joined(separator: "; ") + ". These items are now green."
             } catch {
-                self.message = "Settling stopped after \(done) photo(s): \(Self.describe(error))"
+                self.message = "Fixing stopped after \(replaced + added) item(s): \(Self.describe(error))"
             }
             self.recomputeBundleStatuses()
             self.saveHashCache()
             _ = try? await self.driveIndex.scan { _, _ in }
             try? await self.driveIndex.save()
         }
+    }
+
+    private func copyAlongside(_ item: PhoneItem, old: URL, bundle: ItemBundle, into folder: URL) async throws -> ReceiptEntry {
+        try await resilient(drive: true, phone: true) {
+            let job = CopyJob(item: item, destName: item.name, bundleID: bundle.id, bundleMembers: bundle.members.map(\.name), read: self.phone.reader(id: item.id))
+            return try await Settle.alongside(job, old: old)
+        }
+    }
+
+    private func markVerified(_ item: PhoneItem, hash: String, path: String) {
+        sessionHashes[cacheKey(item)] = hash
+        hashCache[cacheKey(item)] = hash
+        memberStatus[item.id] = .verified(drivePath: path)
     }
 
     // MARK: delete
@@ -779,7 +842,8 @@ final class AppModel {
     /// `ids` and `allowUnbacked` are exactly what the delete sheet showed: anything that stopped being green since,
     /// without being in `allowUnbacked`, is kept.
     func deleteSelected(ids: Set<String>, allowUnbacked: Set<String>) {
-        guard work == nil, phone.canDelete, !ids.isEmpty else { return }
+        guard work == nil else { message = "Something else is running. Wait for it to finish (or press Stop), then delete again."; return }
+        guard phone.canDelete, !ids.isEmpty else { return }
         let chosenNow = bundles.filter { ids.contains($0.id) }
         let green = chosenNow.filter { Matcher.isDeletable(status(of: $0)) }
         let others = chosenNow.filter { !Matcher.isDeletable(status(of: $0)) && allowUnbacked.contains($0.id) }
@@ -794,7 +858,7 @@ final class AppModel {
                 for (i, m) in media.enumerated() where self.sessionHashes[self.cacheKey(m)] == nil {
                     try Task.checkCancellation()
                     self.progress = Progress(label: "Re-checking photos on iPhone before deleting", done: i, total: media.count)
-                    _ = try await self.hash(m, fresh: true)
+                    _ = try await self.resilient(drive: false, phone: true) { try await self.hash(m, fresh: true) }
                 }
                 // One tile at a time: check its drive copies again, then delete it straight away.
                 for (i, b) in chosen.enumerated() {
@@ -905,6 +969,8 @@ final class AppModel {
         case BackupError.nameTaken(let n): return "\(n) already exists; nothing was overwritten."
         case BackupError.verifyFailed(let n): return "The copy of \(n) didn't match the original; it was removed."
         case BackupError.driveGone: return "The drive was disconnected."
+        case Settle.SettleError.driveFileChanged: return "The drive's file changed since it was compared, so it was left alone."
+        case BackupError.io(let code): return "The drive reported a problem: \(String(cString: strerror(code)))."
         case is PhoneGone: return "The iPhone was disconnected."
         case is ShortRead: return "The iPhone sent incomplete data."
         case is TimedOut: return "The iPhone stopped responding. Unlock it and try again."

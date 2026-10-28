@@ -179,8 +179,8 @@ struct SummaryCards: View {
         HStack(alignment: .top, spacing: 12) {
             card(.backedUp, "checkmark.circle.fill", .green, "Backed up", s.verified, s.verifiedBytes, "Exact copy on the drive. Safe to delete from the iPhone.",
                  action: s.verified > 0 && model.phone.canDelete ? ("Select all \(s.verified)", { model.selectAllBackedUp() }) : nil)
-            card(.possible, "questionmark.circle.fill", .orange, "Possible copy", s.possible, s.possibleBytes, "A similar file is on the drive, not identical. Not safe to delete yet.",
-                 action: settle > 0 ? ("Review \(settle)…", { model.sheet = .settle }) : nil)
+            card(.possible, "questionmark.circle.fill", .orange, "Possible copy", s.possible, s.possibleBytes, "A similar file is on the drive, not identical. Fix it to make it green.",
+                 action: settle > 0 ? ("Fix \(settle)…", { model.sheet = .settle }) : nil)
             card(.notBackedUp, "circle.dashed", .secondary, "Not backed up", s.none, s.noneBytes, "Only on the iPhone. Back these up before deleting.")
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -299,7 +299,12 @@ struct SelectionBar: View {
             }
             HStack(spacing: 12) {
                 if mix.green > 0 { chip(.green, "\(mix.green) backed up") }
-                if mix.possible > 0 { chip(.orange, "\(mix.possible) possible copy") }
+                if mix.possible > 0 {
+                    chip(.orange, "\(mix.possible) possible copy")
+                    if model.selectedBundles.contains(where: model.canSettle) {
+                        Button("Fix possible copies…") { model.sheet = .settle }.buttonStyle(.link).disabled(model.busy)
+                    }
+                }
                 if mix.none > 0 { chip(.secondary, "\(mix.none) not backed up") }
                 Spacer()
                 if let why = model.deleteBlocker, model.phone.canDelete {
@@ -368,10 +373,11 @@ struct DeleteSheet: View {
             Text("Deleted items leave the iPhone right away and may not go to its Recently Deleted album. A list of everything deleted is kept on this Mac.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
+                if model.busy { Label("Waiting for the current task to finish…", systemImage: "hourglass").font(.callout).foregroundStyle(.secondary) }
                 if !unbacked.isEmpty && !green.isEmpty {
                     Button("Delete only the \(green.count) backed up") {
                         model.deleteSelected(ids: Set(green.map(\.id)), allowUnbacked: []); dismiss()
-                    }
+                    }.disabled(model.busy)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -379,7 +385,7 @@ struct DeleteSheet: View {
                     model.deleteSelected(ids: Set(all.map(\.id)), allowUnbacked: understood ? Set(unbacked.map(\.id)) : []); dismiss()
                 }
                 .buttonStyle(.borderedProminent).tint(.red)
-                .disabled(all.isEmpty || (!unbacked.isEmpty && !understood))
+                .disabled(all.isEmpty || (!unbacked.isEmpty && !understood) || model.busy)
             }
         }
         .padding(22)
@@ -684,6 +690,7 @@ struct PreviewView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var file: URL?
     @State private var error: String?
+    @State private var player: AVPlayer?   // kept here so a re-render doesn't restart the video
 
     var body: some View {
         let status = model.status(of: bundle)
@@ -713,12 +720,16 @@ struct PreviewView: View {
                 if let r = model.cleanup[bundle.id]?.bestReason, model.cleanup[bundle.id]?.best == true {
                     Label("Best of its similar shots: \(r)", systemImage: "star.fill").foregroundStyle(.yellow)
                 }
+                if model.canSettle(bundle) {
+                    Button("Fix on drive…") { model.sheet = .settle }.buttonStyle(.link).disabled(model.busy)
+                        .help("Replace the drive's copy with this iPhone original, or add the original next to it")
+                }
                 Spacer()
             }
             .font(.callout)
             Group {
                 if let file {
-                    if bundle.primary.isVideo { VideoPlayer(player: AVPlayer(url: file)) }
+                    if bundle.primary.isVideo, let player { VideoPlayer(player: player) }
                     else if let img = NSImage(contentsOf: file) { Image(nsImage: img).resizable().scaledToFit() }
                     else { Text("Can't show this file.").foregroundStyle(.white) }
                 } else if let error { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
@@ -729,12 +740,16 @@ struct PreviewView: View {
         }
         .padding(16)
         .task(id: bundle.id) {
-            file = nil; error = nil
-            do { file = try await model.previewFile(for: bundle.primary) }
-            catch { self.error = AppModel.describe(error) }
+            player?.pause(); player = nil; file = nil; error = nil
+            do {
+                let url = try await model.previewFile(for: bundle.primary)
+                guard !Task.isCancelled else { try? FileManager.default.removeItem(at: url); return }   // moved on to another item meanwhile
+                if bundle.primary.isVideo { player = AVPlayer(url: url) }
+                file = url
+            } catch { self.error = AppModel.describe(error) }
         }
         .onChange(of: file) { old, _ in if let old { try? FileManager.default.removeItem(at: old) } }
-        .onDisappear { if let file { try? FileManager.default.removeItem(at: file) } }
+        .onDisappear { player?.pause(); if let file { try? FileManager.default.removeItem(at: file) } }
     }
 
     private func go(_ i: Int?, _ step: Int) {
@@ -779,7 +794,7 @@ struct BackupSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Back up", action: start).keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
-                    .disabled(problem != nil || label.isEmpty)
+                    .disabled(problem != nil || label.isEmpty || model.busy)
             }
         }
         .padding(22)
@@ -792,66 +807,93 @@ struct BackupSheet: View {
     private func start() { model.backup(folderName: name); dismiss() }
 }
 
-// MARK: - Review possible copies (settle)
+// MARK: - Fix possible copies (settle)
 
 struct SettleSheet: View {
     let model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var chosen: Set<String> = []
-    @State private var autoPicked = false
+    @State private var actions: [String: Settle.Action] = [:]
+    @State private var loaded = false
 
     var body: some View {
         let rows = model.settleRows
-        let ready = rows.filter { $0.verdict == .settle }
-        let done = !rows.isEmpty && rows.allSatisfy { $0.verdict != nil }
+        let comparing = rows.filter { $0.verdict == nil }.count
+        let chosen = rows.compactMap { r in (actions[r.id] ?? r.action).map { (r, $0) } }
+        let replace = chosen.filter { $0.1 == .replace }.count
+        let add = chosen.filter { $0.1 == .keepBoth }.count
+        let todo = replace + add
         VStack(alignment: .leading, spacing: 12) {
-            Text("Review possible copies").font(.title3.weight(.semibold))
-            Text("Where the drive has a weaker copy of the same picture (for example an AirDrop JPG), replace it with the iPhone's original. The new file keeps the old name with the iPhone's format (Bali 7.JPG becomes Bali 7.HEIC) and turns green. The old copy goes to the drive's Trash; nothing is deleted outright.")
+            Text("Fix possible copies").font(.title3.weight(.semibold))
+            Text("The drive has a file that looks like each of these iPhone photos but isn't identical (an AirDrop JPG, for example). “Replace” puts the iPhone original in its place and moves the old file to the drive's Trash. “Keep both” adds the original next to it. Either way the photo turns green and can then be deleted from the iPhone. Nothing is ever deleted outright.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if rows.isEmpty {
+            if rows.isEmpty && loaded {
+                Label("Nothing to fix: no possible copies that can be replaced or added right now.", systemImage: "checkmark.circle")
+                    .foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 120)
+            } else if rows.isEmpty {
                 ProgressView("Comparing…").frame(maxWidth: .infinity, minHeight: 200)
             } else {
-                List(rows) { r in row(r) }.frame(minWidth: 820, minHeight: 380)
+                List(rows) { r in row(r) }.frame(minWidth: 900, minHeight: 380)
             }
-            if done && ready.isEmpty {
-                Label("Nothing to replace: these are different photos or the drive already has the better version. Nothing will be changed.", systemImage: "checkmark.circle")
-                    .foregroundStyle(.secondary)
-            }
-            HStack {
-                Text("\(ready.count) of \(rows.count) can be replaced").foregroundStyle(.secondary)
-                if !ready.isEmpty { Button("Select all \(ready.count)") { chosen = Set(ready.map(\.id)) } }
+            HStack(spacing: 12) {
+                if comparing > 0 {
+                    ProgressView().controlSize(.small)
+                    Text("Comparing \(comparing)…").foregroundStyle(.secondary)
+                } else {
+                    Text("\(replace) to replace · \(add) to add · \(rows.count - todo) left alone").foregroundStyle(.secondary).monospacedDigit()
+                }
+                Menu("Set all…") {
+                    Button("Suggested") { actions = [:] }
+                    Divider()
+                    ForEach(Settle.Action.allCases) { a in Button(a.rawValue) { for r in rows { actions[r.id] = a } } }
+                }.fixedSize()
                 Spacer()
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Replace \(chosen.count)") { model.settle(chosen); dismiss() }
-                    .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
-                    .disabled(chosen.isEmpty || model.busy)
+                Button(todo == 0 ? "Fix" : "Fix \(todo)") {
+                    model.settle(Dictionary(uniqueKeysWithValues: chosen.map { ($0.0.id, $0.1) })); dismiss()
+                }
+                .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+                .disabled(todo == 0 || comparing > 0 || model.busy)
+                .help("Replace or add every item above as shown")
             }
         }
         .padding(20)
-        .task { await model.loadSettleRows() }
-        .onChange(of: done) { _, d in
-            if d && !autoPicked { autoPicked = true; chosen = Set(model.settleRows.filter { $0.verdict == .settle }.map(\.id)) }
-        }
+        .frame(minWidth: 720)
+        .task { await model.loadSettleRows(); loaded = true }
     }
 
     @ViewBuilder private func row(_ r: SettleRow) -> some View {
+        let binding = Binding<Settle.Action>(get: { actions[r.id] ?? r.action ?? .skip }, set: { actions[r.id] = $0 })
         HStack(spacing: 12) {
-            if r.verdict == .settle {
-                Toggle("", isOn: Binding(get: { chosen.contains(r.id) }, set: { if $0 { chosen.insert(r.id) } else { chosen.remove(r.id) } }))
-                    .labelsHidden()
-            } else { Color.clear.frame(width: 16) }
-            side("iPhone", r.phoneThumb, r.item.formatLabel, mp(r.item.pixelWidth, r.item.pixelHeight), r.item.size, r.item.name, best: r.better == .phone)
+            side("iPhone", r.phoneThumb, r.item.formatLabel + (r.bundle.kind == .live ? " + MOV" : ""), r.item.isVideo ? length(r.item.duration) : mp(r.item.pixelWidth, r.item.pixelHeight), r.item.size, r.item.name, best: r.better == .phone)
             Image(systemName: "arrow.left").foregroundStyle(.secondary)
             side("Drive", r.driveThumb, (r.drive.path as NSString).pathExtension.uppercased().replacingOccurrences(of: "JPEG", with: "JPG"),
-                 mp(r.drive.pixelWidth, r.drive.pixelHeight), r.drive.size,
+                 r.item.isVideo ? length(r.drive.duration) : mp(r.drive.pixelWidth, r.drive.pixelHeight), r.drive.size,
                  r.drive.path.replacingOccurrences(of: model.driveRoot.path + "/", with: ""), best: r.better == .drive)
             Spacer()
-            verdict(r.verdict).lineLimit(1).frame(width: 170, alignment: .leading)
+            VStack(alignment: .trailing, spacing: 4) {
+                verdict(r.verdict).lineLimit(1)
+                if r.verdict != nil {
+                    Picker("", selection: binding) { ForEach(Settle.Action.allCases) { Text($0.rawValue).tag($0) } }
+                        .pickerStyle(.segmented).labelsHidden().fixedSize()
+                    Text(consequence(binding.wrappedValue, r)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            .frame(width: 260, alignment: .trailing)
         }
         .padding(.vertical, 4)
     }
 
-    private func side(_ title: String, _ img: CGImage?, _ format: String, _ pixels: String?, _ size: Int64, _ name: String, best: Bool) -> some View {
+    private func length(_ d: Double?) -> String? { d.map { String(format: "%d:%02d", Int($0) / 60, Int($0) % 60) } }
+
+    private func consequence(_ a: Settle.Action, _ r: SettleRow) -> String {
+        switch a {
+        case .replace: r.verdict == .differentPhoto || r.verdict == .sameClip ? "Careful: the drive's file goes to the Trash unchecked" : "Old copy goes to the drive's Trash"
+        case .keepBoth: "iPhone original added next to it"
+        case .skip: "Stays a possible copy"
+        }
+    }
+
+    private func side(_ title: String, _ img: CGImage?, _ format: String, _ detail: String?, _ size: Int64, _ name: String, best: Bool) -> some View {
         HStack(spacing: 8) {
             Group {
                 if let img { Image(decorative: img, scale: 1).resizable().scaledToFill() } else { Rectangle().fill(.quaternary) }
@@ -862,19 +904,20 @@ struct SettleSheet: View {
                     Text(title).font(.callout.weight(.semibold))
                     if best { Text("better").font(.caption2.weight(.bold)).padding(.horizontal, 4).background(.green.opacity(0.25), in: Capsule()) }
                 }
-                Text([format, pixels, gb(size)].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                Text([format, detail, gb(size)].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
                 Text(name).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
-            .frame(width: 200, alignment: .leading)
+            .frame(width: 190, alignment: .leading)
         }
     }
 
     @ViewBuilder private func verdict(_ v: Settle.Verdict?) -> some View {
         switch v {
         case nil: ProgressView().controlSize(.small)
-        case .settle?: Label("Replace", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-        case .driveBetter?: Label("Drive's is better", systemImage: "equal.circle").foregroundStyle(.secondary)
-        case .differentPhoto?: Label("Different photo", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+        case .settle?: Label("Same picture, iPhone's is better", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+        case .driveBetter?: Label("Same picture, drive's is bigger", systemImage: "equal.circle").foregroundStyle(.secondary)
+        case .differentPhoto?: Label("Looks like a different photo", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+        case .sameClip?: Label("Same date and length; not compared frame by frame", systemImage: "film").foregroundStyle(.secondary)
         }
     }
 }

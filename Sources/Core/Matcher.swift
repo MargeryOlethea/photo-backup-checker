@@ -14,7 +14,8 @@ public enum Matcher {
                 if let a = item.duration, let b = c.duration, abs(a - b) <= 1 {
                     return .possible(drivePath: c.path, reason: "Same date and length: \(name)")
                 }
-            } else if let r1 = ratio(item.pixelWidth, item.pixelHeight), let r2 = ratio(c.pixelWidth, c.pixelHeight),
+            } else if c.duration == nil,   // a photo is never a copy of a video (a Live Photo's MOV has the same date and shape)
+                      let r1 = ratio(item.pixelWidth, item.pixelHeight), let r2 = ratio(c.pixelWidth, c.pixelHeight),
                       abs(r1 - r2) / r1 <= 0.01 {
                 return .possible(drivePath: c.path, reason: "Same date and shape: \(name)")
             }

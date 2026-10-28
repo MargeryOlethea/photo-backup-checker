@@ -12,9 +12,11 @@ public enum Jev {
     static let minConfidence = 0.6
 
     /// iPhone 13 screenshots: PNG at the screen's exact pixel size.
+    /// The iPhone camera never writes PNG, so a PNG with an iPhone screen's shape (and at least a screen's size) is a screenshot.
     public static func isScreenshot(_ item: PhoneItem) -> Bool {
-        guard item.uti == UTType.png.identifier, let w = item.pixelWidth, let h = item.pixelHeight else { return false }
-        return Set([w, h]) == [1170, 2532]
+        guard item.uti == UTType.png.identifier, let w = item.pixelWidth, let h = item.pixelHeight, min(w, h) >= 640 else { return false }
+        let ratio = Double(max(w, h)) / Double(min(w, h))
+        return (2.15...2.18).contains(ratio) || (1.77...1.79).contains(ratio)   // all-screen iPhones; 8-era 16:9 ones
     }
 
     public static func requestBody(jpegBase64: String) -> Data {

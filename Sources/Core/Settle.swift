@@ -5,7 +5,13 @@ import CoreGraphics
 /// The iPhone's exact original goes in its place, and the old copy goes to the drive's Trash, never deleted outright.
 public enum Settle {
     public enum Better: Equatable { case phone, drive }
-    public enum Verdict: Equatable { case settle, driveBetter, differentPhoto }
+    /// `sameClip`: a video matched on date and length; frames aren't compared, so the drive copy is never trashed by default.
+    public enum Verdict: Equatable { case settle, driveBetter, differentPhoto, sameClip }
+    /// What to do with one possible copy. Every row gets one, so the whole list can be fixed in one go.
+    public enum Action: String, CaseIterable, Identifiable, Sendable {
+        case replace = "Replace", keepBoth = "Keep both", skip = "Skip"
+        public var id: String { rawValue }
+    }
     /// What makes a drive file "the one that was shown": its inode, size and change time.
     public struct Identity: Equatable, Sendable { let inode: UInt64; let size: Int64; let modified: Date }
     public enum SettleError: Error { case driveFileChanged }
@@ -37,6 +43,43 @@ public enum Settle {
     }
 
     /// How different two pictures look: both shrunk to 32×32 grey (colour-managed), mean absolute difference 0…1.
+    /// The default action for a verdict. Nothing is ever lost: "Replace" sends the old copy to the Trash,
+    /// "Keep both" adds the iPhone original next to it. Either way the photo turns green.
+    public static func suggested(for verdict: Verdict) -> Action {
+        switch verdict {
+        case .settle: .replace            // same picture, iPhone's is better: swap it in
+        case .driveBetter: .keepBoth      // same picture but the drive's is bigger: keep that, add the original
+        case .differentPhoto: .keepBoth   // not the same picture (or couldn't compare): never trash it
+        case .sameClip: .keepBoth         // probably the same video, but not checked frame by frame
+        }
+    }
+
+    /// Adds the iPhone file next to `old` without touching it: as "<old stem>.<iPhone ext>", or
+    /// "<old stem> (from iPhone).<ext>" when that name is taken or is `old` itself. Never overwrites anything.
+    public static func alongside(_ job: CopyJob, old: URL) async throws -> ReceiptEntry {
+        let folder = old.deletingLastPathComponent()
+        let stem = old.deletingPathExtension().lastPathComponent
+        let ext = job.item.ext
+        let plain = ext.isEmpty ? stem : "\(stem).\(ext)"
+        let names = [plain, alongsideName(old: old, ext: ext)].filter { $0.lowercased() != old.lastPathComponent.lowercased() }
+        var j = job
+        for (n, name) in names.enumerated() {
+            j.destName = name
+            do {
+                let entry = try await BackupWriter.copy(j, into: folder)
+                try? BackupWriter.appendReceipt([entry], folder: folder)
+                return entry
+            } catch BackupError.nameTaken where n < names.count - 1 { continue }
+        }
+        throw BackupError.nameTaken(names.last ?? plain)
+    }
+
+    /// Name for the iPhone original when it is added next to `old` rather than replacing it.
+    public static func alongsideName(old: URL, ext: String) -> String {
+        let stem = old.deletingPathExtension().lastPathComponent
+        return ext.isEmpty ? "\(stem) (from iPhone)" : "\(stem) (from iPhone).\(ext)"
+    }
+
     public static func pixelDifference(_ a: CGImage, _ b: CGImage) -> Double? {
         func grey(_ img: CGImage) -> [UInt8]? {
             var px = [UInt8](repeating: 0, count: 32 * 32)
@@ -66,7 +109,7 @@ public enum Settle {
         let stem = old.deletingPathExtension().lastPathComponent
         let ext = job.item.ext
         let target = ext.isEmpty ? stem : "\(stem).\(ext)"
-        let holding = ext.isEmpty ? "\(stem) (from iPhone)" : "\(stem) (from iPhone).\(ext)"
+        let holding = alongsideName(old: old, ext: ext)
         var j = job
         j.destName = target.lowercased() == old.lastPathComponent.lowercased() ? holding : target
         var entry: ReceiptEntry
