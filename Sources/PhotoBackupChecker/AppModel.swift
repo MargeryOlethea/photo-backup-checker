@@ -298,15 +298,14 @@ final class AppModel {
     }
 
     /// Runs one task at a time. Only the task that is still current clears the busy state.
-    /// A jammed connection (a preview or the previous task ended with a hang) is reopened before and after the task,
-    /// so no button ever waits on a dead connection.
+    /// A jammed connection (a preview or the previous task ended with a hang) is reopened first, so no task
+    /// ever starts on a dead connection. (Not after the task: that would keep the app busy once the work is done.)
     private func startWork(_ body: @escaping @MainActor () async -> Void) {
         workID += 1
         let id = workID
         work = Task { [weak self] in
             if let self, self.phone.jammed { try? await self.waitForReplug() }
             if !Task.isCancelled { await body() }
-            if let self, self.workID == id, self.phone.jammed { try? await self.waitForReplug() }
             guard let self, self.workID == id else { return }
             self.work = nil
             self.progress = nil
@@ -330,7 +329,7 @@ final class AppModel {
     /// it is back and runs the same step again. A jammed connection is reopened first (`waitForReplug`), so a step
     /// that timed out gets a working connection for its retry. Only cancelling stops it; other errors are passed on.
     private func resilient<T>(drive: Bool, phone needsPhone: Bool, maxTimeouts: Int = 2, _ step: () async throws -> T) async throws -> T {
-        var timeouts = 0, reconnected = false
+        var timeouts = 0, reconnected = false, notListed = 0
         while true {
             try Task.checkCancellation()
             if let b = blocker(drive: drive, phone: needsPhone) {
@@ -346,12 +345,13 @@ final class AppModel {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                // A file the phone doesn't list while its list is still empty: it is coming in after a (re)connect.
-                // Not listed once the list is there: the file was removed on the phone, and the error is passed on.
+                // A file the phone doesn't list: its list is still coming in after a (re)connect (it arrives in
+                // batches), so wait for it, up to a minute. Still not listed then: it was removed on the phone.
+                if error is NotOnPhone && needsPhone { notListed += 1 }
                 let reason = blocker(drive: drive, phone: needsPhone)
                     ?? (error is TimedOut ? .phoneNotResponding : nil)
                     ?? (error is PhoneGone && needsPhone ? .phoneUnplugged : nil)
-                    ?? (error is NotOnPhone && needsPhone && phone.items.isEmpty ? .phoneLoading : nil)
+                    ?? (error is NotOnPhone && needsPhone && notListed <= 20 ? .phoneLoading : nil)
                 guard let reason else { throw error }
                 // Out of tries: hand the file back to the caller to skip or report. Callers that retry on their own
                 // (maxTimeouts 1) get the error at once; the rest get a fresh connection and a full set of tries first.
@@ -382,7 +382,10 @@ final class AppModel {
         Diag.log("phone jammed — reconnecting")
         pause = .phoneReconnecting
         phone.reconnect()
-        while phone.deviceName != nil && !phone.catalogReady && Date().timeIntervalSince(start) < 90 {
+        var deadline = start.addingTimeInterval(90)
+        while phone.deviceName != nil && !phone.catalogReady && Date() < deadline {
+            // A locked phone can't list its photos: say so, and don't count that time against the reconnect.
+            if phone.isLocked { pause = .phoneLocked; deadline = Date().addingTimeInterval(90) } else { pause = .phoneReconnecting }
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
         if phone.deviceName != nil && phone.catalogReady {

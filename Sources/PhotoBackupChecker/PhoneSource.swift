@@ -31,6 +31,7 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
     private var demoFiles: [String: URL] = [:]   // demo mode: a folder on the Mac stands in for the iPhone
     private var hangs = HangTracker()
     private var reopenPending = false            // reconnect() asked to close; open again once it has
+    private var reconnectCount = 0
     /// Healthy edited versions answer in well under a second (0.7 s worst case over 699 reads); one the iPhone can't
     /// make never answers, however long we wait (2 min tried). Give up fast so the connection can be reopened.
     static let editedReadTimeout: Double = 10
@@ -136,9 +137,11 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
         catalogReady = false
         device.requestCloseSession()
         changed()
+        reconnectCount += 1
+        let attempt = reconnectCount   // a later reconnect() takes over; this attempt's fallback then stays quiet
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 20_000_000_000)
-            guard let self, self.reopenPending, self.device == device else { return }
+            guard let self, self.reopenPending, self.reconnectCount == attempt, self.device == device else { return }
             self.reopen(why: "the close didn't answer; opening the session anyway")
         }
     }
@@ -192,6 +195,8 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
             })
         } catch let e as TimedOut {
             Diag.log("delete got no answer from the iPhone")
+            // A delete normally answers in seconds: no answer on an unlocked phone means the connection is jammed.
+            if !isLocked && !jammed { jammed = true; Diag.log("iPhone connection jammed after a delete") }
             throw e
         }
         let ok = Set(deleted)
