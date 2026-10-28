@@ -15,7 +15,7 @@ func deleteGateTests() async {
         let items = files.map(\.0)
         let b = ItemBundle(id: items[0].id, primary: items[0], members: items, kind: items.count > 1 ? .live : .single)
         var hashes: [String: String] = [:], paths: [String: String] = [:]
-        for (i, p, h) in files where i.id != dropHash { hashes[i.id] = h }
+        for (i, _, h) in files where i.id != dropHash { hashes[i.id] = h }
         for (i, p, _) in files { paths[i.id] = p }
         return DeleteCandidate(bundle: b, phoneHashes: hashes, drivePaths: paths)
     }
@@ -31,4 +31,24 @@ func deleteGateTests() async {
     check(reasons[missC.bundle.id]?.contains("missing") == true, "missing drive copy rejected")
     check(reasons[chC.bundle.id]?.contains("changed") == true, "changed drive copy rejected")
     check(reasons[unC.bundle.id]?.contains("Not checked") == true, "no session hash rejected")
+
+    // A kept drive copy (the drive's better version, not identical): checked against its own size and fingerprint.
+    let keptFile = file("IMG_5.HEIC", "five")
+    let keptURL = URL(fileURLWithPath: keptFile.1).deletingPathExtension().appendingPathExtension("jpg")
+    try! Data("five, bigger and better".utf8).write(to: keptURL)
+    let keptHash = hex(Data("five, bigger and better".utf8))
+    let keptB = ItemBundle(id: keptFile.0.id, primary: keptFile.0, members: [keptFile.0], kind: .single)
+    let keptOK = DeleteCandidate(bundle: keptB, phoneHashes: [keptFile.0.id: keptHash], drivePaths: [keptFile.0.id: keptURL.path],
+                                 keptSizes: [keptFile.0.id: Int64("five, bigger and better".utf8.count)])
+    let keptNoSize = DeleteCandidate(bundle: keptB, phoneHashes: [keptFile.0.id: keptHash], drivePaths: [keptFile.0.id: keptURL.path])
+    let kr = await DeleteGate.verify([keptOK, keptNoSize])
+    check(kr.ok.count == 1 && kr.rejected.count == 1, "kept drive copy passes only with its own size")
+    try! Data("five, edited".utf8).write(to: keptURL)
+    let keptChanged = await DeleteGate.verify([keptOK])
+    check(keptChanged.ok.isEmpty, "kept drive copy changed since: rejected")
+
+    let out = PhoneDelete.outcome(ids: ["a", "b", "c"], present: ["a", "b"], confirmed: ["a"])
+    check(out["a"] == .some(nil), "confirmed by the iPhone counts as deleted")
+    check(out["b"] != .some(nil), "still on the iPhone and not confirmed is not deleted")
+    check(out["c"] == .some(nil), "already gone before asking (late answer) counts as deleted")
 }

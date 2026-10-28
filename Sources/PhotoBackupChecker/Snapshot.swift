@@ -1,10 +1,11 @@
 import AppKit
+import Core
 
 /// Testing aid (PBC_SNAPSHOT_DIR, demo only). Each line written to <dir>/request is one command:
 ///   snap <name>          save every open window as <dir>/<name>-<n>.png
 ///   filter <Filter name> show that filter        select <n> / select none / select first-of <Filter name> <n>
 ///   sheet backup|delete|settle|ready|preview|none   open or close a sheet
-///   do-settle / do-backup <folder> / do-delete green|all / status (writes status.txt)   run the real actions
+///   do-settle [same|different] / do-backup <folder> / recheck / do-delete green|all / status (writes status.txt)   run the real actions
 /// Lets the screens be checked without screen-recording permission.
 enum Snapshot {
     @MainActor static func start(dir: URL, model: AppModel) {
@@ -44,14 +45,17 @@ enum Snapshot {
             switch arg {
             case "backup": model.sheet = .backup
             case "delete": model.sheet = .delete
-            case "settle": model.sheet = .settle
+            case "settle": model.sheet = .settle(only: nil)
             case "ready": model.sheet = .readyList
             case "preview": model.sheet = model.visible.first.map { .preview($0) }
             default: model.sheet = nil
             }
-        case "do-settle":   // run every row with its suggested action
-            model.settle(Dictionary(uniqueKeysWithValues: model.settleRows.compactMap { r in r.action.map { (r.id, $0) } }))
+        case "do-settle":   // run every row with its suggested action; "same"/"different" also answers the unsure ones
+            model.settle(Dictionary(uniqueKeysWithValues: model.settleRows.compactMap { r in
+                (r.action ?? (arg.isEmpty ? nil : Settle.reconciled(same: arg == "same", better: r.better))).map { (r.id, $0) }
+            }))
         case "do-backup": model.backup(folderName: arg)
+        case "recheck": model.recheck()
         case "do-delete":   // "green" = only backed-up selected items; "all" = with consent for the rest
             let sel = model.selectedBundles
             let unbacked = model.selectedUnbacked

@@ -62,7 +62,7 @@ struct ContentView: View {
             case .preview(let b): PreviewView(model: model, bundle: b, list: model.visible, onOpen: { model.sheet = .preview($0) })
             case .backup: BackupSheet(model: model)
             case .delete: DeleteSheet(model: model)
-            case .settle: SettleSheet(model: model)
+            case .settle(let only): SettleSheet(model: model, only: only)
             case .readyList: ReadyToDeleteView(model: model)
             }
         }
@@ -180,7 +180,7 @@ struct SummaryCards: View {
             card(.backedUp, "checkmark.circle.fill", .green, "Backed up", s.verified, s.verifiedBytes, "Exact copy on the drive. Safe to delete from the iPhone.",
                  action: s.verified > 0 && model.phone.canDelete ? ("Select all \(s.verified)", { model.selectAllBackedUp() }) : nil)
             card(.possible, "questionmark.circle.fill", .orange, "Possible copy", s.possible, s.possibleBytes, "A similar file is on the drive, not identical. Fix it to make it green.",
-                 action: settle > 0 ? ("Fix \(settle)…", { model.sheet = .settle }) : nil)
+                 action: settle > 0 ? ("Fix \(settle)…", { model.sheet = .settle(only: nil) }) : nil)
             card(.notBackedUp, "circle.dashed", .secondary, "Not backed up", s.none, s.noneBytes, "Only on the iPhone. Back these up before deleting.")
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -302,7 +302,7 @@ struct SelectionBar: View {
                 if mix.possible > 0 {
                     chip(.orange, "\(mix.possible) possible copy")
                     if model.selectedBundles.contains(where: model.canSettle) {
-                        Button("Fix possible copies…") { model.sheet = .settle }.buttonStyle(.link).disabled(model.busy)
+                        Button("Fix possible copies…") { model.sheet = .settle(only: model.selection) }.buttonStyle(.link).disabled(model.busy)
                     }
                 }
                 if mix.none > 0 { chip(.secondary, "\(mix.none) not backed up") }
@@ -715,14 +715,14 @@ struct PreviewView: View {
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             HStack(spacing: 14) {
-                Label(status.label, systemImage: status.color == nil ? "circle.dashed" : "circle.fill")
+                Label(model.keptDriveCopy(bundle) ? "Backed up: kept the drive's better copy" : status.label, systemImage: status.color == nil ? "circle.dashed" : "circle.fill")
                     .foregroundStyle(status.color ?? .secondary)
                 if let r = model.cleanup[bundle.id]?.bestReason, model.cleanup[bundle.id]?.best == true {
                     Label("Best of its similar shots: \(r)", systemImage: "star.fill").foregroundStyle(.yellow)
                 }
                 if model.canSettle(bundle) {
-                    Button("Fix on drive…") { model.sheet = .settle }.buttonStyle(.link).disabled(model.busy)
-                        .help("Replace the drive's copy with this iPhone original, or add the original next to it")
+                    Button("Fix…") { model.sheet = .settle(only: [bundle.id]) }.buttonStyle(.link).disabled(model.busy)
+                        .help("Fix this possible copy: keep the better version, or compare them yourself")
                 }
                 Spacer()
             }
@@ -811,23 +811,40 @@ struct BackupSheet: View {
 
 struct SettleSheet: View {
     let model: AppModel
+    let only: Set<String>?
     @Environment(\.dismiss) private var dismiss
-    @State private var actions: [String: Settle.Action] = [:]
+    @State private var chosen: [String: Settle.Action] = [:]   // what the person decided in Reconcile
+    @State private var leftOut: Set<String> = []
+    @State private var reconciling: SettleRow?
     @State private var loaded = false
 
+    private func action(_ r: SettleRow) -> Settle.Action? { chosen[r.id] ?? r.action }
+
     var body: some View {
+        Group {
+            if let r = reconciling {
+                ReconcileView(model: model, row: r) { a in
+                    if let a { chosen[r.id] = a; leftOut.remove(r.id) }
+                    reconciling = nil
+                }
+            } else { list }
+        }
+        .padding(20)
+        .frame(minWidth: 960, minHeight: 600)
+        .task { await model.loadSettleRows(only: only); loaded = true }
+    }
+
+    private var list: some View {
         let rows = model.settleRows
         let comparing = rows.filter { $0.verdict == nil }.count
-        let chosen = rows.compactMap { r in (actions[r.id] ?? r.action).map { (r, $0) } }
-        let replace = chosen.filter { $0.1 == .replace }.count
-        let add = chosen.filter { $0.1 == .keepBoth }.count
-        let todo = replace + add
-        VStack(alignment: .leading, spacing: 12) {
+        let todo = rows.filter { !leftOut.contains($0.id) }.compactMap { r in action(r).map { (r.id, $0) } }
+        let unsure = rows.filter { $0.verdict != nil && action($0) == nil }.count
+        return VStack(alignment: .leading, spacing: 12) {
             Text("Fix possible copies").font(.title3.weight(.semibold))
-            Text("The drive has a file that looks like each of these iPhone photos but isn't identical (an AirDrop JPG, for example). “Replace” puts the iPhone original in its place and moves the old file to the drive's Trash. “Keep both” adds the original next to it. Either way the photo turns green and can then be deleted from the iPhone. Nothing is ever deleted outright.")
+            Text("The drive has a file that looks like each of these iPhone photos but isn't identical. Where the iPhone's is better, it replaces the drive copy (the old one goes to the drive's Trash). Where the drive's is better, that copy is kept and the item turns green. Where the app isn't sure, press “Compare” and decide yourself.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if rows.isEmpty && loaded {
-                Label("Nothing to fix: no possible copies that can be replaced or added right now.", systemImage: "checkmark.circle")
+                Label("Nothing to fix: no possible copies that can be fixed right now.", systemImage: "checkmark.circle")
                     .foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 120)
             } else if rows.isEmpty {
                 ProgressView("Comparing…").frame(maxWidth: .infinity, minHeight: 200)
@@ -839,43 +856,37 @@ struct SettleSheet: View {
                     ProgressView().controlSize(.small)
                     Text("Comparing \(comparing)…").foregroundStyle(.secondary)
                 } else {
-                    Text("\(replace) to replace · \(add) to add · \(rows.count - todo) left alone").foregroundStyle(.secondary).monospacedDigit()
+                    Text("\(todo.count) to fix" + (unsure > 0 ? " · \(unsure) to compare" : "")).foregroundStyle(.secondary).monospacedDigit()
                 }
-                Menu("Set all…") {
-                    Button("Suggested") { actions = [:] }
-                    Divider()
-                    ForEach(Settle.Action.allCases) { a in Button(a.rawValue) { for r in rows { actions[r.id] = a } } }
-                }.fixedSize()
                 Spacer()
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(todo == 0 ? "Fix" : "Fix \(todo)") {
-                    model.settle(Dictionary(uniqueKeysWithValues: chosen.map { ($0.0.id, $0.1) })); dismiss()
+                Button(todo.isEmpty ? "Fix" : "Fix \(todo.count)") {
+                    model.settle(Dictionary(uniqueKeysWithValues: todo)); dismiss()
                 }
                 .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
-                .disabled(todo == 0 || comparing > 0 || model.busy)
-                .help("Replace or add every item above as shown")
+                .disabled(todo.isEmpty || comparing > 0 || model.busy)
+                .help("Fix every ticked item above as shown")
             }
         }
-        .padding(20)
-        .frame(minWidth: 720)
-        .task { await model.loadSettleRows(); loaded = true }
     }
 
     @ViewBuilder private func row(_ r: SettleRow) -> some View {
-        let binding = Binding<Settle.Action>(get: { actions[r.id] ?? r.action ?? .skip }, set: { actions[r.id] = $0 })
+        let a = action(r)
         HStack(spacing: 12) {
-            side("iPhone", r.phoneThumb, r.item.formatLabel + (r.bundle.kind == .live ? " + MOV" : ""), r.item.isVideo ? length(r.item.duration) : mp(r.item.pixelWidth, r.item.pixelHeight), r.item.size, r.item.name, best: r.better == .phone)
+            Toggle("", isOn: Binding(get: { a != nil && !leftOut.contains(r.id) },
+                                     set: { if $0 { leftOut.remove(r.id) } else { leftOut.insert(r.id) } }))
+                .labelsHidden().disabled(a == nil)
+            SettleSide(model: model, row: r, phone: true, img: r.phoneThumb, size: 64)
             Image(systemName: "arrow.left").foregroundStyle(.secondary)
-            side("Drive", r.driveThumb, (r.drive.path as NSString).pathExtension.uppercased().replacingOccurrences(of: "JPEG", with: "JPG"),
-                 r.item.isVideo ? length(r.drive.duration) : mp(r.drive.pixelWidth, r.drive.pixelHeight), r.drive.size,
-                 r.drive.path.replacingOccurrences(of: model.driveRoot.path + "/", with: ""), best: r.better == .drive)
+            SettleSide(model: model, row: r, phone: false, img: r.driveThumb, size: 64)
             Spacer()
             VStack(alignment: .trailing, spacing: 4) {
-                verdict(r.verdict).lineLimit(1)
+                if r.verdict == nil { ProgressView().controlSize(.small) }
+                else if let a { Label(Self.consequence(a, r), systemImage: Self.icon(a)).foregroundStyle(a == .different ? Color.secondary : .green).lineLimit(1) }
+                else { Label("Not sure: compare them", systemImage: "questionmark.circle").foregroundStyle(.orange).lineLimit(1) }
                 if r.verdict != nil {
-                    Picker("", selection: binding) { ForEach(Settle.Action.allCases) { Text($0.rawValue).tag($0) } }
-                        .pickerStyle(.segmented).labelsHidden().fixedSize()
-                    Text(consequence(binding.wrappedValue, r)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Button(a == nil ? "Compare…" : "Compare again…") { reconciling = r }
+                        .buttonStyle(a == nil ? AnyButtonStyle(.borderedProminent) : AnyButtonStyle(.link))
                 }
             }
             .frame(width: 260, alignment: .trailing)
@@ -883,41 +894,97 @@ struct SettleSheet: View {
         .padding(.vertical, 4)
     }
 
-    private func length(_ d: Double?) -> String? { d.map { String(format: "%d:%02d", Int($0) / 60, Int($0) % 60) } }
-
-    private func consequence(_ a: Settle.Action, _ r: SettleRow) -> String {
+    static func consequence(_ a: Settle.Action, _ r: SettleRow) -> String {
         switch a {
-        case .replace: r.verdict == .differentPhoto || r.verdict == .sameClip ? "Careful: the drive's file goes to the Trash unchecked" : "Old copy goes to the drive's Trash"
+        case .replace: "Replace with the iPhone original"
+        case .keepDrive: "Keep the drive's copy"
+        case .different: "Not the same: back up later"
         case .keepBoth: "iPhone original added next to it"
-        case .skip: "Stays a possible copy"
+        }
+    }
+    static func icon(_ a: Settle.Action) -> String {
+        switch a { case .replace: "arrow.left.arrow.right"; case .keepDrive: "checkmark.circle.fill"; case .different: "circle.dashed"; case .keepBoth: "plus.circle" }
+    }
+}
+
+/// One side of a possible copy: picture, format, size and name, with a "better" tag.
+private struct SettleSide: View {
+    let model: AppModel
+    let row: SettleRow
+    let phone: Bool
+    let img: CGImage?
+    let size: CGFloat
+
+    var body: some View {
+        let r = row
+        let format = phone ? r.item.formatLabel + (r.bundle.kind == .live ? " + MOV" : "")
+                           : (r.drive.path as NSString).pathExtension.uppercased().replacingOccurrences(of: "JPEG", with: "JPG")
+        let detail = r.item.isVideo ? length(phone ? r.item.duration : r.drive.duration)
+                                    : (phone ? mp(r.item.pixelWidth, r.item.pixelHeight) : mp(r.drive.pixelWidth, r.drive.pixelHeight))
+        let name = phone ? r.item.name : r.drive.path.replacingOccurrences(of: model.driveRoot.path + "/", with: "")
+        let best = r.better == (phone ? .phone : .drive)
+        let big = size > 100
+        let info = VStack(alignment: big ? .center : .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Text(phone ? "iPhone" : "Drive").font(.callout.weight(.semibold))
+                if best { Text("better").font(.caption2.weight(.bold)).padding(.horizontal, 4).background(.green.opacity(0.25), in: Capsule()) }
+            }
+            Text([format, detail, gb(phone ? r.item.size : r.drive.size)].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+            Text(name).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+        }
+        let pic = Group {
+            if let img { Image(decorative: img, scale: 1).resizable().aspectRatio(contentMode: big ? .fit : .fill) }
+            else if big { ProgressView() }
+            else { Rectangle().fill(.quaternary) }
+        }
+        if big {
+            VStack(spacing: 8) {
+                pic.frame(maxWidth: .infinity, minHeight: size, maxHeight: .infinity).background(Color.black, in: RoundedRectangle(cornerRadius: Radius.tile))
+                info
+            }
+        } else {
+            HStack(spacing: 8) {
+                pic.frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: 6))
+                info.frame(width: 170, alignment: .leading)
+            }
         }
     }
 
-    private func side(_ title: String, _ img: CGImage?, _ format: String, _ detail: String?, _ size: Int64, _ name: String, best: Bool) -> some View {
-        HStack(spacing: 8) {
-            Group {
-                if let img { Image(decorative: img, scale: 1).resizable().scaledToFill() } else { Rectangle().fill(.quaternary) }
-            }
-            .frame(width: 64, height: 64).clipShape(RoundedRectangle(cornerRadius: 6))
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 4) {
-                    Text(title).font(.callout.weight(.semibold))
-                    if best { Text("better").font(.caption2.weight(.bold)).padding(.horizontal, 4).background(.green.opacity(0.25), in: Capsule()) }
-                }
-                Text([format, detail, gb(size)].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
-                Text(name).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-            }
-            .frame(width: 190, alignment: .leading)
-        }
-    }
+    private func length(_ d: Double?) -> String? { d.map { String(format: "%d:%02d", Int($0) / 60, Int($0) % 60) } }
+}
 
-    @ViewBuilder private func verdict(_ v: Settle.Verdict?) -> some View {
-        switch v {
-        case nil: ProgressView().controlSize(.small)
-        case .settle?: Label("Same picture, iPhone's is better", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-        case .driveBetter?: Label("Same picture, drive's is bigger", systemImage: "equal.circle").foregroundStyle(.secondary)
-        case .differentPhoto?: Label("Looks like a different photo", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
-        case .sameClip?: Label("Same date and length; not compared frame by frame", systemImage: "film").foregroundStyle(.secondary)
+/// Both versions side by side, big, so the person can say whether they're the same photo.
+private struct ReconcileView: View {
+    let model: AppModel
+    let row: SettleRow
+    let done: (Settle.Action?) -> Void
+    @State private var phoneImg: CGImage?
+    @State private var driveImg: CGImage?
+
+    var body: some View {
+        let r = row
+        VStack(alignment: .leading, spacing: 12) {
+            Text(r.item.isVideo ? "Is this the same video?" : "Is this the same photo?").font(.title3.weight(.semibold))
+            HStack(spacing: 16) {
+                SettleSide(model: model, row: r, phone: true, img: phoneImg, size: 420)
+                SettleSide(model: model, row: r, phone: false, img: driveImg, size: 420)
+            }
+            .frame(minWidth: 900, minHeight: 480)
+            Text("Same: " + (r.better == .phone ? "the iPhone original replaces the drive copy (the old one goes to the drive's Trash)." : "the drive's copy is kept as the backup and the item turns green.")
+                 + " Not the same: it stays “Not backed up”, so your next backup includes it." + (r.item.isVideo ? " Only the first frame is shown; check the length too." : ""))
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Back") { done(nil) }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Not the same") { done(Settle.reconciled(same: false, better: r.better)) }
+                Button("Same") { done(Settle.reconciled(same: true, better: r.better)) }
+                    .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+            }
+        }
+        .task(id: r.id) {
+            phoneImg = r.phoneThumb; driveImg = r.driveThumb
+            let big = await model.reconcileImages(r)
+            phoneImg = big.phone; driveImg = big.drive
         }
     }
 }

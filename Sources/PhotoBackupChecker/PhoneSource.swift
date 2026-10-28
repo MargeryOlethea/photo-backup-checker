@@ -110,33 +110,35 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
     }
 
     /// Deletes from the phone. Returns item id → nil on success, or the failure message.
-    func delete(ids: [String]) async -> [String: String?] {
+    /// Throws `TimedOut` when the phone doesn't answer within 30 s, so the caller can pause and ask again.
+    func delete(ids: [String]) async throws -> [String: String?] {
         if !demoFiles.isEmpty {   // demo: drop from the list only; the sample files stay
             items.removeAll { ids.contains($0.id) }
             changed()
             return Dictionary(uniqueKeysWithValues: ids.map { ($0, nil) })
         }
         guard let device else { return Dictionary(uniqueKeysWithValues: ids.map { ($0, "iPhone disconnected") }) }
-        let targets = ids.compactMap { files[$0] }
+        // Files already gone (an earlier request that timed out went through after all) aren't asked for again.
+        // Captured now: the phone may report the removal (and drop them from `files`) before the answer arrives.
+        let present = ids.compactMap { id in files[id].map { (id, $0) } }
+        guard !present.isEmpty else { return PhoneDelete.outcome(ids: ids, present: [], confirmed: []) }
         nonisolated(unsafe) let dev = device
-        nonisolated(unsafe) let list = targets
+        nonisolated(unsafe) let list = present.map(\.1)
         // Success is only what the phone lists as deleted, matched by object identity, not by name.
-        // No answer in 2 minutes: report nothing as deleted. A fresh check shows what actually went.
-        guard let deleted: [ObjectIdentifier] = try? await Timeout.callback(seconds: 120, { done in
-            _ = dev.requestDeleteFiles(list, deleteFailed: { _ in }, completion: { result, _ in
-                done(.success((result[.successful] ?? []).map(ObjectIdentifier.init)))
+        let deleted: [ObjectIdentifier]
+        do {
+            deleted = try await Timeout.callback(seconds: 30, { done in
+                _ = dev.requestDeleteFiles(list, deleteFailed: { _ in }, completion: { result, _ in
+                    done(.success((result[.successful] ?? []).map(ObjectIdentifier.init)))
+                })
             })
-        }) else {
+        } catch let e as TimedOut {
             Diag.log("delete got no answer from the iPhone")
-            return Dictionary(uniqueKeysWithValues: ids.map { ($0, "iPhone didn't confirm. Check again to see what was deleted.") })
+            throw e
         }
         let ok = Set(deleted)
-        var out: [String: String?] = [:]
-        for id in ids {
-            guard let f = files[id] else { out[id] = "Not found on iPhone"; continue }
-            out[id] = ok.contains(ObjectIdentifier(f)) ? nil : "iPhone didn't delete it"
-        }
-        return out
+        let confirmed = present.filter { ok.contains(ObjectIdentifier($0.1)) }.map(\.0)
+        return PhoneDelete.outcome(ids: ids, present: Set(present.map(\.0)), confirmed: Set(confirmed))
     }
 
     // MARK: building the item list

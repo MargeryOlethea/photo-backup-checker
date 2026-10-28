@@ -29,4 +29,26 @@ func timeoutTests() async {
         done(.success(1)); done(.success(2))
     }
     check(twice == 1, "first answer wins")
+
+    // Stop (task cancelled) ends the wait at once, not when the time limit runs out.
+    let waiting = Task {
+        try await Timeout.callback(seconds: 5) { (_: @escaping @Sendable (Result<Int, Error>) -> Void) in }
+    }
+    let stopAt = Date()
+    try? await Task.sleep(nanoseconds: 100_000_000)
+    waiting.cancel()
+    let stopped: Bool
+    do { _ = try await waiting.value; stopped = false } catch { stopped = error is CancellationError }
+    check(stopped, "Stop ends the wait with a cancel")
+    check(Date().timeIntervalSince(stopAt) < 1, "Stop doesn't wait for the time limit")
+
+    // Already stopped before the wait begins: ends at once too.
+    let pre = Task {
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        return try await Timeout.callback(seconds: 5) { (_: @escaping @Sendable (Result<Int, Error>) -> Void) in }
+    }
+    pre.cancel()
+    let preAt = Date()
+    _ = try? await pre.value
+    check(Date().timeIntervalSince(preAt) < 1, "a wait started after Stop ends at once")
 }
