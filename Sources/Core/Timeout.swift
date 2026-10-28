@@ -40,18 +40,17 @@ public enum Timeout {
     }
 }
 
-/// Tells a stuck phone apart from edited versions it can't make. Lives for one connection: a replug starts a new one.
-/// When the phone fails to make one edited version (IMG_E…), every edited version after it hangs too, until a replug,
-/// so the rest are left for then. Two stored files hanging back to back mean the phone stopped answering.
+/// Tells a jammed connection from a merely slow file. Lives for one connection: a reconnect or replug starts a new one.
+/// An edited version (IMG_E…) the phone can't make never answers, and every request after it (reads and deletes alike)
+/// hangs too until the session is reopened, so one such hang means jammed. Stored files are served as they are,
+/// so only two of them hanging back to back mean the phone stopped answering.
 public struct HangTracker {
     private var storedHangs = 0
-    public private(set) var editsBlocked = false
     public init() {}
-    public func shouldRead(_ item: PhoneItem) -> Bool { !(item.isEditedRender && editsBlocked) }
     public mutating func answered() { storedHangs = 0 }
-    /// Returns true when the phone looks stuck.
+    /// Returns true when the connection is jammed and must be reopened before anything else is asked of the phone.
     public mutating func timedOut(_ item: PhoneItem) -> Bool {
-        if item.isEditedRender { editsBlocked = true; return false }
+        if item.isEditedRender { return true }
         storedHangs += 1
         return storedHangs >= 2
     }

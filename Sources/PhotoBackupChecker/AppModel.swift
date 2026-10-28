@@ -58,7 +58,7 @@ struct Progress: Equatable { var label: String; var done: Int; var total: Int }
 
 /// Why running work is waiting. It continues by itself once the cause is gone.
 enum Pause: Equatable {
-    case driveUnplugged, phoneUnplugged, phoneLocked, phoneNotResponding, phoneLoading, phoneStuck
+    case driveUnplugged, phoneUnplugged, phoneLocked, phoneNotResponding, phoneLoading, phoneReconnecting, phoneStuck
     var text: String {
         switch self {
         case .driveUnplugged: "Hard disk unplugged. Plug it back in to continue. Nothing was lost."
@@ -66,7 +66,8 @@ enum Pause: Equatable {
         case .phoneLocked: "iPhone is locked. Unlock it to continue."
         case .phoneNotResponding: "iPhone stopped responding. Unlock it and keep the screen on; the app keeps retrying."
         case .phoneLoading: "Reading the list of photos on the iPhone…"
-        case .phoneStuck: "iPhone stopped answering. Unplug it and plug it back in; checking continues by itself. Nothing was lost."
+        case .phoneReconnecting: "iPhone stopped answering. Reconnecting by itself (about half a minute)… Nothing was lost."
+        case .phoneStuck: "iPhone stopped answering and reconnecting didn't help. Unplug it and plug it back in; work continues by itself. Nothing was lost."
         }
     }
 }
@@ -119,10 +120,8 @@ final class AppModel {
     private var autoCheckPending = false
     /// The person pressed Stop: no check starts by itself until "Check again" or a replug.
     private var stoppedByUser = false
-    /// Hang bookkeeping for the current connection; a replug starts fresh.
-    private var hangs = HangTracker()
-    /// Edited versions (device-scoped keys) the iPhone failed to make; not asked for again.
-    private var badRenders: [String: Date] = [:]   // key → when it hung
+    /// Edited versions (device-scoped keys) the iPhone failed to make: one try per check, given up after 3 checks.
+    private var renders = RenderTries()
     private var deviceID: String?
     private var lastSave = Date()
 
@@ -147,7 +146,7 @@ final class AppModel {
         scoreCache = JSONStore.load([String: ShotScore].self, from: appData.appendingPathComponent("shot-scores.json"))
         jevPicks = JSONStore.load([String: String].self, from: appData.appendingPathComponent("jev-picks.json"))
         decisions = JSONStore.load([String: Settle.Decision].self, from: appData.appendingPathComponent("settle-decisions.json"))
-        badRenders = JSONStore.load([String: Date].self, from: appData.appendingPathComponent("bad-renders.json"))
+        renders = RenderTries.load(from: appData.appendingPathComponent("bad-renders.json"))
         phone.onChange = { [weak self] in self?.phoneChanged() }
         if let demoPhone { phone.startDemo(folder: demoPhone) } else { phone.start() }
         driveMounted = FileManager.default.fileExists(atPath: root.path)
@@ -268,7 +267,7 @@ final class AppModel {
             cancel(); checked = false; sessionHashes = [:]; memberStatus = [:]; bundleStatus = [:]; cleanup = [:]; bundles = []; selection = []
         }
         if let id = phone.deviceID { deviceID = id }
-        if phone.deviceName == nil { hangs = HangTracker(); stoppedByUser = false }
+        if phone.deviceName == nil { stoppedByUser = false }
         // While unplugged, keep showing what we know; running work pauses and continues on replug.
         guard phone.deviceName != nil, phone.catalogReady else { return }
         let newBundles = Bundler.bundles(phone.items)
@@ -299,11 +298,14 @@ final class AppModel {
     }
 
     /// Runs one task at a time. Only the task that is still current clears the busy state.
+    /// A jammed connection (a preview or the previous task ended with a hang) is reopened first, so no task
+    /// ever starts on a dead connection. (Not after the task: that would keep the app busy once the work is done.)
     private func startWork(_ body: @escaping @MainActor () async -> Void) {
         workID += 1
         let id = workID
         work = Task { [weak self] in
-            await body()
+            if let self, self.phone.jammed { try? await self.waitForReplug() }
+            if !Task.isCancelled { await body() }
             guard let self, self.workID == id else { return }
             self.work = nil
             self.progress = nil
@@ -324,9 +326,10 @@ final class AppModel {
     }
 
     /// Runs one step. If the drive or phone drops out (or the phone stops answering), waits until
-    /// it is back and runs the same step again. Only cancelling stops it; other errors are passed on.
+    /// it is back and runs the same step again. A jammed connection is reopened first (`waitForReplug`), so a step
+    /// that timed out gets a working connection for its retry. Only cancelling stops it; other errors are passed on.
     private func resilient<T>(drive: Bool, phone needsPhone: Bool, maxTimeouts: Int = 2, _ step: () async throws -> T) async throws -> T {
-        var timeouts = 0
+        var timeouts = 0, reconnected = false, notListed = 0
         while true {
             try Task.checkCancellation()
             if let b = blocker(drive: drive, phone: needsPhone) {
@@ -334,6 +337,7 @@ final class AppModel {
                 try await Task.sleep(nanoseconds: 2_000_000_000)
                 continue
             }
+            if needsPhone && phone.jammed { try await waitForReplug(); continue }
             do {
                 let v = try await step()
                 pause = nil
@@ -341,14 +345,22 @@ final class AppModel {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                // A file the phone doesn't list: its list is still coming in after a (re)connect (it arrives in
+                // batches), so wait for it, up to a minute. Still not listed then: it was removed on the phone.
+                if error is NotOnPhone && needsPhone { notListed += 1 }
                 let reason = blocker(drive: drive, phone: needsPhone)
                     ?? (error is TimedOut ? .phoneNotResponding : nil)
                     ?? (error is PhoneGone && needsPhone ? .phoneUnplugged : nil)
+                    ?? (error is NotOnPhone && needsPhone && notListed <= 20 ? .phoneLoading : nil)
                 guard let reason else { throw error }
-                // Out of tries: hand the file back to the caller to skip or report.
+                // Out of tries: hand the file back to the caller to skip or report. Callers that retry on their own
+                // (maxTimeouts 1) get the error at once; the rest get a fresh connection and a full set of tries first.
                 if reason == .phoneNotResponding {
                     timeouts += 1
-                    if timeouts >= maxTimeouts { pause = nil; throw error }
+                    if timeouts >= maxTimeouts {
+                        if maxTimeouts > 1 && phone.jammed && !reconnected { reconnected = true; timeouts = 0; continue }
+                        pause = nil; throw error
+                    }
                     Diag.log("timeout #\(timeouts) — trying again")
                     pause = reason
                     continue
@@ -360,13 +372,29 @@ final class AppModel {
         }
     }
 
-    /// The phone stopped answering altogether. Only a replug clears that, so ask for one and wait
-    /// until it is unplugged; the next step then waits for it to come back.
+    /// The connection is jammed: a request hung and everything after it would too. First reopens the session by
+    /// itself (a software replug, usually about 30 s). If the phone hasn't listed its photos again within 90 s,
+    /// asks for a real replug and waits for it; the next step then runs on the fresh connection.
     private func waitForReplug() async throws {
-        Diag.log("phone stuck — asking for a replug")
-        pause = .phoneStuck
+        let start = Date()
         saveNow()
-        while phone.deviceName != nil {
+        guard phone.deviceName != nil else { phone.reconnect(); return }   // unplugged: clears the jam; the next step waits for the replug
+        Diag.log("phone jammed — reconnecting")
+        pause = .phoneReconnecting
+        phone.reconnect()
+        var deadline = start.addingTimeInterval(90)
+        while phone.deviceName != nil && !phone.catalogReady && Date() < deadline {
+            // A locked phone can't list its photos: say so, and don't count that time against the reconnect.
+            if phone.isLocked { pause = .phoneLocked; deadline = Date().addingTimeInterval(90) } else { pause = .phoneReconnecting }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        if phone.deviceName != nil && phone.catalogReady {
+            Diag.log("reconnected in \(Int(Date().timeIntervalSince(start))) s")
+            return
+        }
+        Diag.log("reconnecting didn't work — asking for a replug")
+        pause = .phoneStuck
+        while phone.deviceName != nil && !phone.catalogReady {
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
     }
@@ -389,8 +417,7 @@ final class AppModel {
         message = nil
         startWork { [weak self] in
             guard let self else { return }
-            // Edited versions left waiting keep "checked" off, so the replug starts a check by itself.
-            do { self.checked = try await self.runCheck() == 0; self.lastChecked = Date() }
+            do { try await self.runCheck(); self.checked = true; self.lastChecked = Date() }
             catch is CancellationError { self.stoppedByUser = true; self.message = "Check stopped. Press “Check again” when you're ready." }
             catch is PhoneGone { self.message = "iPhone was disconnected. Plug it back in to continue." }
             catch { self.message = "Check stopped: \(error.localizedDescription)" }
@@ -399,9 +426,9 @@ final class AppModel {
         }
     }
 
-    /// Returns how many edited versions are left waiting for a replug.
-    private func runCheck() async throws -> Int {
+    private func runCheck() async throws {
         let media = phone.items.filter { !$0.isSidecar }
+        renders.newRun()
 
         progress = Progress(label: "Reading backup drive", done: 0, total: 0)
         let index = driveIndex
@@ -429,33 +456,29 @@ final class AppModel {
         // Phone files worth fingerprinting: same size as a drive file, or as another phone file (duplicates).
         let phoneSizeCounts = Dictionary(grouping: media, by: \.size).mapValues(\.count)
         let toHash = PhoneItem.storedFirst(media.filter {
-            (bySize[$0.size] != nil || (phoneSizeCounts[$0.size] ?? 0) > 1) && badRenders[deviceKey($0)] == nil
+            (bySize[$0.size] != nil || (phoneSizeCounts[$0.size] ?? 0) > 1) && (knownHash($0) != nil || renders.shouldTry(deviceKey($0)))
         })
         var unreadable = 0
         var slow: [PhoneItem] = []
-        var editsWaiting = 0
         // Reads one file. Returns false if it hung and is worth one slow retry at the end.
-        // An edited version that hangs is given up on; stored files hanging back to back mean: replug.
+        // An edited version that hangs is noted as a failed try (the jam it causes is cleared by the next step).
         func read(_ item: PhoneItem, timeout: Double) async throws -> Bool {
             do {
                 _ = try await resilient(drive: false, phone: true, maxTimeouts: 1) { try await self.hash(item, fresh: false, timeout: timeout) }
-                hangs.answered()
                 return true
             }
             catch is CancellationError { throw CancellationError() }
             catch is TimedOut {
                 Diag.log("skipped slow file \(item.id)")
-                if item.isEditedRender { badRenders[deviceKey(item)] = Date() }
-                if hangs.timedOut(item) { try await waitForReplug(); hangs.answered() }
+                noteBadRender(item)
                 return item.isEditedRender
             }
-            catch { unreadable += 1; hangs.answered(); return true }   // the phone answered, just not with the file; it stays without a fingerprint, so it can't turn green
+            catch { unreadable += 1; return true }   // the phone answered, just not with the file; it stays without a fingerprint, so it can't turn green
         }
         for (i, item) in toHash.enumerated() {
             try Task.checkCancellation()
             progress = Progress(label: "Checking photos on iPhone", done: i, total: toHash.count)
             // Already fingerprinted ones are still "read" here: that's instant and costs nothing.
-            guard hangs.shouldRead(item) || knownHash(item) != nil else { editsWaiting += 1; continue }
             if try await !read(item, timeout: 30) { slow.append(item) }
             saveIfDue()
         }
@@ -512,15 +535,19 @@ final class AppModel {
         try await findSimilar(into: &info)
         try Task.checkCancellation()
         cleanup = info
-        let cantMake = media.filter { badRenders[deviceKey($0)] != nil && knownHash($0) == nil }.count
+        let failedRenders = media.filter { renders.tried(deviceKey($0)) && knownHash($0) == nil }
+        let gaveUp = failedRenders.filter { renders.gaveUp(deviceKey($0)) }.count
+        let tryAgain = failedRenders.count - gaveUp
         let notes = [
-            editsWaiting > 0 ? "\(editsWaiting) edited version(s) still to check: the iPhone stopped making them. Unplug and replug the iPhone; checking continues by itself." : nil,
             unreadable > 0 ? "\(unreadable) file(s) couldn't be read from the iPhone; they stay unmarked." : nil,
-            cantMake > 0 ? "\(cantMake) edited version(s) the iPhone can't make; they stay unmarked." : nil,
+            tryAgain > 0 ? "\(tryAgain) edited version(s) the iPhone couldn't make this time; they stay unmarked and are tried again next time." : nil,
+            gaveUp > 0 ? "\(gaveUp) edited version(s) the iPhone can't make (tried \(RenderTries.max) times); they stay unmarked." : nil,
         ].compactMap { $0 }
         message = notes.isEmpty ? nil : notes.joined(separator: " ")
-        return editsWaiting
     }
+
+    /// A hung read of an edited version counts as one failed try of it; stored files are never given up on.
+    private func noteBadRender(_ item: PhoneItem) { if item.isEditedRender { renders.failed(deviceKey(item)) } }
 
     private func findSimilar(into info: inout [String: CleanupInfo]) async throws {
         let stills = bundles.filter { !$0.primary.isVideo && $0.primary.captureDate != nil }.sorted { $0.primary.captureDate! < $1.primary.captureDate! }
@@ -661,24 +688,14 @@ final class AppModel {
     }
 
     /// A whole photo from the phone, or nil if it can't be read now (only cancelling is passed on).
-    /// Edited versions the phone can't make are skipped: once one hangs, the rest would too until a replug.
-    /// Stored files hanging back to back mean the phone is stuck: ask for a replug, then try the same file again.
+    /// Edited versions the phone can't make are skipped (one try per run); a hang jams the connection, which the
+    /// next step clears by reconnecting.
     private func fullDataOrSkip(_ item: PhoneItem) async throws -> Data? {
-        guard hangs.shouldRead(item), badRenders[deviceKey(item)] == nil else { return nil }
-        do {
-            let data = try await resilient(drive: false, phone: true, maxTimeouts: 1) { try await self.phone.fullData(id: item.id) }
-            hangs.answered()
-            return data
-        }
+        guard renders.shouldTry(deviceKey(item)) else { return nil }
+        do { return try await resilient(drive: false, phone: true, maxTimeouts: 1) { try await self.phone.fullData(id: item.id) } }
         catch is CancellationError { throw CancellationError() }
-        catch is TimedOut {
-            Diag.log("skipped slow file \(item.id)")
-            if item.isEditedRender && !hangs.editsBlocked { badRenders[deviceKey(item)] = Date() }
-            guard hangs.timedOut(item) else { return nil }
-            try await waitForReplug()
-            return try await fullDataOrSkip(item)
-        }
-        catch { hangs.answered(); return nil }
+        catch is TimedOut { Diag.log("skipped slow file \(item.id)"); noteBadRender(item); return nil }
+        catch { return nil }
     }
 
     /// Upright image no bigger than `size` on its long side.
@@ -721,7 +738,7 @@ final class AppModel {
     private static let saveQueue = DispatchQueue(label: "PhotoBackupChecker.save", qos: .utility)
 
     private func saveHashCache() {
-        let dir = appData, hashes = hashCache, jev = jevCache, prints = printCache, bad = badRenders, scores = scoreCache, picks = jevPicks, decided = decisions
+        let dir = appData, hashes = hashCache, jev = jevCache, prints = printCache, bad = renders.counts, scores = scoreCache, picks = jevPicks, decided = decisions
         Self.saveQueue.async {
             try? JSONStore.save(decided, to: dir.appendingPathComponent("settle-decisions.json"))
             try? JSONStore.save(hashes, to: dir.appendingPathComponent("phone-hashes.json"))
@@ -760,6 +777,7 @@ final class AppModel {
         startWork { [weak self] in
             guard let self else { return }
             var entries: [ReceiptEntry] = []
+            var leftOut = 0
             do {
                 let existing = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
                 let plan = try BackupWriter.plan(bundles: chosen, folderName: folderName, existingNames: existing)
@@ -769,14 +787,24 @@ final class AppModel {
                     self.progress = Progress(label: "Backing up to \(folder.lastPathComponent)", done: i, total: plan.count)
                     // A failed attempt leaves nothing behind (the writer removes its own temporary file),
                     // so after a replug the same file is simply copied again.
-                    let e = try await self.resilient(drive: true, phone: true) {
-                        let job = CopyJob(item: p.item, destName: p.destName, bundleID: p.bundleID, bundleMembers: p.bundleMembers, read: self.phone.reader(id: p.item.id))
-                        return try await BackupWriter.copy(job, into: folder)
+                    // An edited version that hangs once is one the iPhone can't make: no second read of it.
+                    let e: ReceiptEntry
+                    do {
+                        e = try await self.resilient(drive: true, phone: true, maxTimeouts: p.item.isEditedRender ? 1 : 2) {
+                            let job = CopyJob(item: p.item, destName: p.destName, bundleID: p.bundleID, bundleMembers: p.bundleMembers, read: self.phone.reader(id: p.item.id))
+                            return try await BackupWriter.copy(job, into: folder)
+                        }
+                    } catch is TimedOut where p.item.isEditedRender {
+                        // The iPhone can't make this edited version: leave it out and carry on; its item stays not fully backed up.
+                        self.noteBadRender(p.item)
+                        leftOut += 1
+                        continue
                     }
                     entries.append(e)
                     self.markVerified(p.item, hash: e.sha256, path: folder.appendingPathComponent(p.destName).path)
                 }
                 self.message = "Backed up \(chosen.count) item\(chosen.count == 1 ? "" : "s") to \(folder.lastPathComponent)."
+                    + (leftOut > 0 ? " \(leftOut) edited version(s) the iPhone couldn't make were left out; those items aren't green yet." : "")
                 self.selection = []
             } catch {
                 self.message = "Backup stopped after \(entries.count) file(s): \(Self.describe(error))"
@@ -1149,6 +1177,7 @@ final class AppModel {
         case Settle.SettleError.driveFileChanged: return "The drive's file changed since it was compared, so it was left alone."
         case BackupError.io(let code): return "The drive reported a problem: \(String(cString: strerror(code)))."
         case is PhoneGone: return "The iPhone was disconnected."
+        case is NotOnPhone: return "A photo is no longer on the iPhone."
         case is ShortRead: return "The iPhone sent incomplete data."
         case is TimedOut: return "The iPhone stopped responding. Unlock it and try again."
         default: return e.localizedDescription
