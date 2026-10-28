@@ -575,14 +575,34 @@ final class AppModel {
     /// ★ per similar group: Apple scores every photo on the Mac; Jev settles only the close calls.
     private func pickBest(_ groups: [[String]], into info: inout [String: CleanupInfo]) async throws {
         let byID = Dictionary(uniqueKeysWithValues: bundles.map { ($0.id, $0) })
-        let need = groups.joined().compactMap { byID[$0]?.primary }.filter { !$0.isVideo && scoreCache[deviceKey($0)] == nil }
-        for (i, item) in need.enumerated() {
-            try Task.checkCancellation()
-            progress = Progress(label: "Picking the best of similar shots", done: i, total: need.count)
-            guard let data = try await fullDataOrSkip(item), let img = Self.downscaled(data, to: 1600),
-                  let s = BestPick.score(cgImage: img) else { continue }
-            scoreCache[deviceKey(item)] = s
-            saveIfDue()
+        var seen = Set<String>()
+        var need: [(item: PhoneItem, key: String)] = []
+        for item in groups.joined().compactMap({ byID[$0]?.primary }) where !item.isVideo && scoreCache[deviceKey(item)] == nil && seen.insert(item.id).inserted {
+            need.append((item, deviceKey(item)))
+        }
+        // Whole files come from the iPhone a few at a time; scoring runs off the main thread so the window stays responsive.
+        var done = 0
+        progress = Progress(label: "Picking the best of similar shots", done: 0, total: need.count)
+        try await withThrowingTaskGroup(of: (String, ShotScore?).self) { group in
+            var it = need.makeIterator()
+            func add() -> Bool {
+                guard let (item, key) = it.next() else { return false }
+                group.addTask { @MainActor in
+                    guard let data = try await self.fullDataOrSkip(item) else { return (key, nil) }
+                    let score = await Task.detached { Self.downscaled(data, to: 1600).flatMap(BestPick.score(cgImage:)) }.value
+                    return (key, score)
+                }
+                return true
+            }
+            for _ in 0..<3 { if !add() { break } }
+            while let (key, score) = try await group.next() {
+                try Task.checkCancellation()
+                if let score { scoreCache[key] = score }
+                done += 1
+                progress = Progress(label: "Picking the best of similar shots", done: done, total: need.count)
+                saveIfDue()
+                _ = add()
+            }
         }
         let key = Jev.loadKey(from: appData)
         for g in groups {
