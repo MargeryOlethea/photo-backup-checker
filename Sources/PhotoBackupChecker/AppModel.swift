@@ -517,19 +517,52 @@ final class AppModel {
         }
         let byID = Dictionary(uniqueKeysWithValues: stills.map { ($0.id, $0.primary) })
         var prints: [String: VNFeaturePrintObservation] = [:]
-        for (i, id) in needed.sorted().enumerated() {
-            try Task.checkCancellation()
-            progress = Progress(label: "Looking for similar shots", done: i, total: needed.count)
+        var todo: [(id: String, item: PhoneItem, key: String)] = []
+        for id in needed.sorted() {
             guard let item = byID[id] else { continue }
             let key = deviceKey(item)
-            if let d = printCache[key],
-               let fp = try? NSKeyedUnarchiver.unarchivedObject(ofClass: VNFeaturePrintObservation.self, from: d) {
+            if let d = printCache[key], let fp = try? NSKeyedUnarchiver.unarchivedObject(ofClass: VNFeaturePrintObservation.self, from: d) {
                 prints[id] = fp
-            } else if let img = await thumbnail(for: item), let fp = try? Cleanup.featurePrint(cgImage: img) {
-                prints[id] = fp
-                printCache[key] = try? NSKeyedArchiver.archivedData(withRootObject: fp, requiringSecureCoding: true)
+            } else {
+                todo.append((id, item, key))
             }
-            saveIfDue()
+        }
+        // Fingerprints not yet known: thumbnails come from the Mac's cache or the iPhone, a few at a time,
+        // and the image work runs off the main thread so the window stays responsive.
+        let store = thumbStore
+        var done = 0
+        progress = Progress(label: "Looking for similar shots", done: 0, total: todo.count)
+        try await withThrowingTaskGroup(of: (String, String, Data?).self) { group in
+            var it = todo.makeIterator()
+            func add() -> Bool {
+                guard let (id, item, key) = it.next() else { return false }
+                group.addTask { @MainActor in
+                    var data = await Task.detached { store.data(for: key) }.value
+                    if data == nil, let d = await self.phone.thumbnailData(id: item.id) {
+                        data = d
+                        Task.detached { store.put(d, for: key) }
+                    }
+                    guard let data else { return (id, key, nil) }
+                    let archived = await Task.detached { () -> Data? in
+                        guard let img = Self.downscaled(data, to: 320), let fp = try? Cleanup.featurePrint(cgImage: img) else { return nil }
+                        return try? NSKeyedArchiver.archivedData(withRootObject: fp, requiringSecureCoding: true)
+                    }.value
+                    return (id, key, archived)
+                }
+                return true
+            }
+            for _ in 0..<4 { if !add() { break } }
+            while let (id, key, archived) = try await group.next() {
+                try Task.checkCancellation()
+                if let archived, let fp = try? NSKeyedUnarchiver.unarchivedObject(ofClass: VNFeaturePrintObservation.self, from: archived) {
+                    prints[id] = fp
+                    printCache[key] = archived
+                }
+                done += 1
+                progress = Progress(label: "Looking for similar shots", done: done, total: todo.count)
+                saveIfDue()
+                _ = add()
+            }
         }
         let groups = Cleanup.similarGroups(items: stills.map { var p = $0.primary; p.id = $0.id; return p }) { a, b in
             guard let x = prints[a], let y = prints[b] else { return nil }
