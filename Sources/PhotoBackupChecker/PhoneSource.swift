@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 import Core
 
 struct PhoneGone: Error {}
+/// The phone is connected but doesn't list this file: its list is still coming in, or the file was removed on the phone.
+struct NotOnPhone: Error {}
 
 /// The phone, through Apple's camera connection (the same one Image Capture uses).
 /// ImageCaptureCore calls its delegates on the main thread; all state here lives on the main actor.
@@ -17,12 +19,21 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
     private(set) var isLocked = false
     private(set) var canDelete = false
     private(set) var catalogReady = false
-    private(set) var items: [PhoneItem] = []
+    private(set) var items: [PhoneItem] = [] { didSet { itemsByID = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) } }
+    private var itemsByID: [String: PhoneItem] = [:]
+    /// A request hung in a way that blocks every later one (see `HangTracker`). Nothing is asked of the phone
+    /// until `reconnect()` reopens the session or the phone is replugged.
+    private(set) var jammed = false
 
     private let browser = ICDeviceBrowser()
     private var device: ICCameraDevice?
     private var files: [String: ICCameraFile] = [:]
     private var demoFiles: [String: URL] = [:]   // demo mode: a folder on the Mac stands in for the iPhone
+    private var hangs = HangTracker()
+    private var reopenPending = false            // reconnect() asked to close; open again once it has
+    /// Healthy edited versions answer in well under a second (0.7 s worst case over 699 reads); one the iPhone can't
+    /// make never answers, however long we wait (2 min tried). Give up fast so the connection can be reopened.
+    static let editedReadTimeout: Double = 10
 
     func start() {
         browser.delegate = self
@@ -81,22 +92,67 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
             }
         }
         nonisolated(unsafe) let file = files[id]
+        let item = itemsByID[id]
+        let limit = item?.isEditedRender == true ? min(timeout, Self.editedReadTimeout) : timeout
         return { offset, length in
-            guard let file, file.device != nil else { throw PhoneGone() }
-            // A locked or stalled iPhone may never answer: give up after 30 s so the app can pause and retry.
-            let d: Data = try await Timeout.callback(seconds: timeout) { done in
-                file.requestReadData(atOffset: off_t(offset), length: off_t(length)) { data, error in
-                    if let data { done(.success(data)) }
-                    else { done(.failure(file.device == nil ? PhoneGone() : (error ?? PhoneGone()))) }
+            guard let file else { throw NotOnPhone() }
+            guard file.device != nil else { throw PhoneGone() }
+            // A locked or stalled iPhone may never answer: give up after `limit` so the app can pause and retry.
+            let d: Data
+            do {
+                d = try await Timeout.callback(seconds: limit) { done in
+                    file.requestReadData(atOffset: off_t(offset), length: off_t(length)) { data, error in
+                        if let data { done(.success(data)) }
+                        else { done(.failure(file.device == nil ? PhoneGone() : (error ?? PhoneGone()))) }
+                    }
                 }
+            } catch is TimedOut {
+                if let item { await self.hung(item) }
+                throw TimedOut()
             }
+            await self.answered()
             guard d.count == length else { throw ShortRead() }
             return d
         }
     }
 
+    /// A locked phone doesn't answer either; that is waited out, not treated as a jam.
+    private func hung(_ item: PhoneItem) {
+        guard !isLocked, hangs.timedOut(item), !jammed else { return }
+        jammed = true
+        Diag.log("iPhone connection jammed after \(item.id)")
+    }
+    private func answered() { hangs.answered() }
+
+    /// Software replug: closes the session and opens it again, which clears a jammed connection without unplugging.
+    /// `catalogReady` is false until the phone has listed its photos again; the caller decides how long to wait.
+    /// A jammed session sometimes never confirms the close; after 20 s the open is sent anyway.
+    func reconnect() {
+        jammed = false
+        hangs = HangTracker()
+        guard let device, demoFiles.isEmpty else { return }
+        Diag.log("reconnecting: closing the session")
+        reopenPending = true
+        catalogReady = false
+        device.requestCloseSession()
+        changed()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            guard let self, self.reopenPending, self.device == device else { return }
+            self.reopen(why: "the close didn't answer; opening the session anyway")
+        }
+    }
+
+    /// Second half of `reconnect()`. (Synchronous on purpose: in an async context Swift picks the framework's
+    /// async `requestOpenSession(options:)` instead of the delegate-based one this class is built on.)
+    private func reopen(why: String) {
+        reopenPending = false
+        Diag.log("reconnecting: \(why)")
+        device?.requestOpenSession()
+    }
+
     func fullData(id: String) async throws -> Data {
-        guard let item = items.first(where: { $0.id == id }), item.size > 0 else { throw EmptyFile() }
+        guard let item = itemsByID[id], item.size > 0 else { throw EmptyFile() }
         let read = reader(id: id)
         var out = Data(capacity: Int(item.size))
         var off: Int64 = 0
@@ -196,6 +252,7 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
     private func reset() {
         device = nil; deviceName = nil; deviceID = nil; isLocked = false; canDelete = false; catalogReady = false
         items = []; files = [:]
+        jammed = false; hangs = HangTracker(); reopenPending = false
         changed()
     }
 
@@ -208,6 +265,8 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
     }
     func device(_ device: ICDevice, didCloseSessionWithError error: (any Error)?) {
         Diag.log("session closed (error: \(error?.localizedDescription ?? "none"))")
+        guard reopenPending, device == self.device else { return }
+        reopen(why: "opening the session again")
     }
     func deviceDidBecomeReady(withCompleteContentCatalog device: ICCameraDevice) {
         Diag.log("catalog ready: \(device.mediaFiles?.count ?? 0) files")

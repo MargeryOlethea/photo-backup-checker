@@ -45,11 +45,11 @@ Two targets with a hard boundary:
 
 ### Work model
 
-`AppModel.startWork` runs at most one `Task` at a time (`work`/`workID`); `busy` gates every mutating button. `resilient(drive:phone:)` wraps each step: if the drive or phone disappears it sets `pause` and retries the same step on reconnect, so unplugging mid-operation never fails the job. Phone reads and deletes go through `Timeout.callback` (ends at once on Stop); `HangTracker` decides whether a timed-out file is skipped or the user is asked to replug.
+`AppModel.startWork` runs at most one `Task` at a time (`work`/`workID`); `busy` gates every mutating button. `resilient(drive:phone:)` wraps each step: if the drive or phone disappears it sets `pause` and retries the same step on reconnect, so unplugging mid-operation never fails the job. Phone reads and deletes go through `Timeout.callback` (ends at once on Stop; edited versions get 10 s, everything else 30 s). An edited version the iPhone can't make never answers and jams the whole session (every later read and delete hangs), so `HangTracker` (in `PhoneSource`) marks the connection `jammed` after one such hang or two stored-file hangs in a row; `resilient` and `startWork` then call `waitForReplug`, which reopens the session by itself (`PhoneSource.reconnect`, up to 90 s) and only asks for a physical replug if that fails. Bad edited versions are tried once per check and given up on after 3 checks (`RenderTries`).
 
 ### Persistence
 
-Everything lives in `~/Library/Application Support/PhotoBackupChecker/` (demo mode uses a `demo/` subfolder wiped on launch): `drive-index.json`, `phone-hashes.json`, `jev-verdicts.json`, `similar-prints.json`, `shot-scores.json`, `jev-picks.json`, `settle-decisions.json`, `bad-renders.json`, `thumbs/`, `debug.log`, `deleted-from-iphone.txt`, and the optional `jev.key`. The chosen drive folder is in `UserDefaults` key `driveRoot`; the default is the user's specific external volume path in `AppModel.init`. Each backup folder on the drive gets a `.photo-backup-receipt.json`.
+Everything lives in `~/Library/Application Support/PhotoBackupChecker/` (demo mode uses a `demo/` subfolder wiped on launch): `drive-index.json`, `phone-hashes.json`, `jev-verdicts.json`, `similar-prints.json`, `shot-scores.json`, `jev-picks.json`, `settle-decisions.json`, `bad-renders.json` (edited version key → failed tries), `thumbs/`, `debug.log`, `deleted-from-iphone.txt`, and the optional `jev.key`. The chosen drive folder is in `UserDefaults` key `driveRoot`; the default is the user's specific external volume path in `AppModel.init`. Each backup folder on the drive gets a `.photo-backup-receipt.json`.
 
 ### Conventions
 
