@@ -580,29 +580,37 @@ final class AppModel {
         for item in groups.joined().compactMap({ byID[$0]?.primary }) where !item.isVideo && scoreCache[deviceKey(item)] == nil && seen.insert(item.id).inserted {
             need.append((item, deviceKey(item)))
         }
-        // Whole files come from the iPhone a few at a time; scoring runs off the main thread so the window stays responsive.
+        // Stored files come from the iPhone a few at a time; scoring runs off the main thread so the window stays responsive.
+        // Edited versions the phone has to make go last and one by one: one it can't make jams the phone until a replug.
+        let stored = need.filter { !$0.item.isEditedRender }, edits = need.filter { $0.item.isEditedRender }
         var done = 0
+        let phaseStart = Date()
+        Diag.log("pick best: \(groups.count) groups, \(groups.joined().count) shots, \(need.count) to score")
+        defer { Diag.log("pick best: scoring took \(String(format: "%.1f", Date().timeIntervalSince(phaseStart))) s") }
         progress = Progress(label: "Picking the best of similar shots", done: 0, total: need.count)
+        func finished(_ key: String, _ score: ShotScore?) {
+            if let score { scoreCache[key] = score }
+            done += 1
+            progress = Progress(label: "Picking the best of similar shots", done: done, total: need.count)
+            saveIfDue()
+        }
         try await withThrowingTaskGroup(of: (String, ShotScore?).self) { group in
-            var it = need.makeIterator()
+            var it = stored.makeIterator()
             func add() -> Bool {
                 guard let (item, key) = it.next() else { return false }
-                group.addTask { @MainActor in
-                    guard let data = try await self.fullDataOrSkip(item) else { return (key, nil) }
-                    let score = await Task.detached { Self.downscaled(data, to: 1600).flatMap(BestPick.score(cgImage:)) }.value
-                    return (key, score)
-                }
+                group.addTask { @MainActor in (key, try await self.shotScore(item)) }
                 return true
             }
             for _ in 0..<3 { if !add() { break } }
             while let (key, score) = try await group.next() {
                 try Task.checkCancellation()
-                if let score { scoreCache[key] = score }
-                done += 1
-                progress = Progress(label: "Picking the best of similar shots", done: done, total: need.count)
-                saveIfDue()
+                finished(key, score)
                 _ = add()
             }
+        }
+        for (item, key) in edits {
+            try Task.checkCancellation()
+            finished(key, try await shotScore(item))
         }
         let key = Jev.loadKey(from: appData)
         for g in groups {
@@ -630,11 +638,31 @@ final class AppModel {
         }
     }
 
+    /// Apple's score for one photo, or nil if it can't be read or scored now.
+    private func shotScore(_ item: PhoneItem) async throws -> ShotScore? {
+        guard let data = try await fullDataOrSkip(item) else { return nil }
+        return await Task.detached { Self.downscaled(data, to: 1600).flatMap(BestPick.score(cgImage:)) }.value
+    }
+
     /// A whole photo from the phone, or nil if it can't be read now (only cancelling is passed on).
+    /// Edited versions the phone can't make are skipped: once one hangs, the rest would too until a replug.
+    /// Stored files hanging back to back mean the phone is stuck: ask for a replug, then try the same file again.
     private func fullDataOrSkip(_ item: PhoneItem) async throws -> Data? {
-        do { return try await resilient(drive: false, phone: true, maxTimeouts: 1) { try await self.phone.fullData(id: item.id) } }
+        guard hangs.shouldRead(item), badRenders[deviceKey(item)] == nil else { return nil }
+        do {
+            let data = try await resilient(drive: false, phone: true, maxTimeouts: 1) { try await self.phone.fullData(id: item.id) }
+            hangs.answered()
+            return data
+        }
         catch is CancellationError { throw CancellationError() }
-        catch { return nil }
+        catch is TimedOut {
+            Diag.log("skipped slow file \(item.id)")
+            if item.isEditedRender && !hangs.editsBlocked { badRenders[deviceKey(item)] = Date() }
+            guard hangs.timedOut(item) else { return nil }
+            try await waitForReplug()
+            return try await fullDataOrSkip(item)
+        }
+        catch { hangs.answered(); return nil }
     }
 
     /// Upright image no bigger than `size` on its long side.
