@@ -26,13 +26,13 @@ Select tiles (click to toggle, double-click to preview) → **Back up selected�
 
 ## Fixing possible copies (amber)
 
-Click **Fix N…** on the Possible copy card (or **Fix on drive…** in a preview). Each amber item is shown next to its drive file with a suggested action:
+Click **Fix N…** on the Possible copy card to see every amber item, or select some items and click **Fix possible copies…** (or **Fix…** in a preview) to see only those. Each item is shown next to its drive file, and the app decides by itself when it can:
 
-- **Replace**: the iPhone original takes the drive file's place, keeping its name with the iPhone's format (`Bali 7.JPG` → `Bali 7.HEIC`). The old file goes to the drive's Trash. Suggested when it is the same picture and the iPhone's is better.
-- **Keep both**: the iPhone original is added next to the drive file (`Bali 7.HEIC`, or `Bali 7 (from iPhone).HEIC` if that name is taken). Suggested when the drive's copy is bigger, or when they don't look like the same picture.
-- **Skip**: leave it amber.
+- **Replace with the iPhone original**: same picture, and the iPhone's is better. The iPhone original takes the drive file's place, keeping its name with the iPhone's format (`Bali 7.JPG` → `Bali 7.HEIC`). The old file goes to the drive's Trash.
+- **Keep the drive's copy**: same picture, and the drive's is better (more pixels, then bigger file). Nothing is copied; the item turns green and the drive's copy counts as its backup. The app remembers this and re-checks that drive file (fingerprint) on every check and right before deleting from the iPhone. A Live Photo's video is still copied if the drive doesn't have it.
+- **Not sure: compare them**: the pictures look different, or it's a video (matched by date and length only). Press **Compare…** to see both big, side by side, then **Same** (settled as above) or **Not the same** (the item turns grey, "Not backed up", and goes with your next backup). The app remembers "Not the same".
 
-Press **Fix N**. Every copy is verified after writing, so the items turn green. Live Photos bring their video and any edit file along. Videos are matched by date and length only, so they default to **Keep both**.
+Untick an item to leave it amber. Press **Fix N**.
 
 ## Deleting from the phone
 

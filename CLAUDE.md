@@ -37,18 +37,19 @@ Two targets with a hard boundary:
 ### Safety invariants (do not weaken)
 
 - Only `.verified` bundles are deletable (`Matcher.isDeletable`). `DeleteGate.verify` re-hashes the drive copy immediately before each delete, and `deleteSelected` requires a hash read from the phone *this session* (`sessionHashes`, not `hashCache`).
-- Settling a possible copy never deletes: `Settle.suggested(for:)` maps a verdict to Replace (old copy to Trash) or Keep both (original added alongside), and `AppModel.settle` only acts on rows whose drive file is unchanged since it was compared (`SettleRow.identity`).
+- One exception to "green = byte-identical", chosen by the owner: a possible copy whose drive version is better can be kept as its backup (`Settle.Decision.keepDrive`, saved in `settle-decisions.json`). It is green only while the drive file's fingerprint equals the one stored when kept (re-hashed on every check, `Settle.applying`), and the delete gate checks it against that fingerprint and size (`DeleteCandidate.keptSizes`). One drive file never stands in for two iPhone photos.
+- Settling a possible copy never deletes: `Settle.suggested(for:)` maps a verdict to Replace (old copy to Trash) or Keep drive; unsure verdicts (`differentPhoto`, `sameClip`) need the person's Compare (`Settle.reconciled`). "Not the same" (`Decision.different`) only clears that one match to Not backed up. `AppModel.settle` only acts on rows whose drive file is unchanged since it was compared (`SettleRow.identity`).
 - `BackupWriter.copy` streams to a hidden staging file, fsyncs, re-reads and re-hashes it, then places it with `renamex_np(RENAME_EXCL)` → `link` → exclusive-create fallback. Existing drive files are never overwritten; `BackupError.nameTaken` is thrown instead. `Settle.replace` moves the old copy to the Trash, never deletes it.
 - Hash caches are keyed `"id|size|captureDate"` (`cacheKey`) so a re-shot file at the same path never reuses a stale hash. Device-scoped data (thumbnails, prints, Jev verdicts, scores) is additionally prefixed with the phone's persistent ID (`deviceKey`).
 - `DriveIndex.save` refuses to write unless a full scan completed, so an interrupted scan can't shrink the cache.
 
 ### Work model
 
-`AppModel.startWork` runs at most one `Task` at a time (`work`/`workID`); `busy` gates every mutating button. `resilient(drive:phone:)` wraps each step: if the drive or phone disappears it sets `pause` and retries the same step on reconnect, so unplugging mid-operation never fails the job. Phone reads go through `Timeout.callback`; `HangTracker` decides whether a timed-out file is skipped or the user is asked to replug.
+`AppModel.startWork` runs at most one `Task` at a time (`work`/`workID`); `busy` gates every mutating button. `resilient(drive:phone:)` wraps each step: if the drive or phone disappears it sets `pause` and retries the same step on reconnect, so unplugging mid-operation never fails the job. Phone reads and deletes go through `Timeout.callback` (ends at once on Stop); `HangTracker` decides whether a timed-out file is skipped or the user is asked to replug.
 
 ### Persistence
 
-Everything lives in `~/Library/Application Support/PhotoBackupChecker/` (demo mode uses a `demo/` subfolder wiped on launch): `drive-index.json`, `phone-hashes.json`, `jev-verdicts.json`, `similar-prints.json`, `shot-scores.json`, `jev-picks.json`, `bad-renders.json`, `thumbs/`, `debug.log`, `deleted-from-iphone.txt`, and the optional `jev.key`. The chosen drive folder is in `UserDefaults` key `driveRoot`; the default is the user's specific external volume path in `AppModel.init`. Each backup folder on the drive gets a `.photo-backup-receipt.json`.
+Everything lives in `~/Library/Application Support/PhotoBackupChecker/` (demo mode uses a `demo/` subfolder wiped on launch): `drive-index.json`, `phone-hashes.json`, `jev-verdicts.json`, `similar-prints.json`, `shot-scores.json`, `jev-picks.json`, `settle-decisions.json`, `bad-renders.json`, `thumbs/`, `debug.log`, `deleted-from-iphone.txt`, and the optional `jev.key`. The chosen drive folder is in `UserDefaults` key `driveRoot`; the default is the user's specific external volume path in `AppModel.init`. Each backup folder on the drive gets a `.photo-backup-receipt.json`.
 
 ### Conventions
 

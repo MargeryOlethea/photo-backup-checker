@@ -39,9 +39,25 @@ func settleTests() async {
 
     // Suggested action: never one that loses a picture
     check(Settle.suggested(for: .settle) == .replace, "same picture, iPhone better: replace")
-    check(Settle.suggested(for: .driveBetter) == .keepBoth, "drive better: keep both")
-    check(Settle.suggested(for: .differentPhoto) == .keepBoth, "different photo: keep both, never trash")
-    check(Settle.suggested(for: .sameClip) == .keepBoth, "video matched by date and length: keep both")
+    check(Settle.suggested(for: .driveBetter) == .keepDrive, "drive better: keep the drive's copy")
+    check(Settle.suggested(for: .differentPhoto) == nil, "looks different: the person decides")
+    check(Settle.suggested(for: .sameClip) == nil, "video matched by date and length: the person decides")
+    check(Settle.reconciled(same: true, better: .phone) == .replace, "reconciled same, iPhone better: replace")
+    check(Settle.reconciled(same: true, better: .drive) == .keepDrive, "reconciled same, drive better: keep drive")
+    check(Settle.reconciled(same: false, better: .phone) == .different, "reconciled not the same: separate photo")
+
+    // Remembered decisions.
+    let possible = Status.possible(drivePath: "/d/a.jpg", reason: "")
+    let kept = Settle.Decision(kind: .keepDrive, drivePath: "/d/a.jpg", driveSize: 100, driveSHA256: "h")
+    check(Settle.applying(kept, to: possible, driveSHA256: "h") == .verified(drivePath: "/d/a.jpg"), "kept drive copy turns green")
+    check(Settle.applying(kept, to: possible, driveSHA256: "other") == possible, "kept drive copy's bytes changed: back to possible")
+    check(Settle.applying(kept, to: .none, driveSHA256: nil) == .none, "kept drive copy gone: not green")
+    check(Settle.applying(Settle.Decision(kind: .keepDrive, drivePath: "/d/a.jpg", driveSize: 100), to: possible, driveSHA256: nil) == possible, "kept without a fingerprint: never green")
+    check(Settle.applying(kept, to: .verified(drivePath: "/d/x.heic"), driveSHA256: "h") == .verified(drivePath: "/d/x.heic"), "an exact copy wins over a kept one")
+    let diff = Settle.Decision(kind: .different, drivePath: "/d/a.jpg", driveSize: 100)
+    check(Settle.applying(diff, to: possible, driveSHA256: nil) == .none, "not the same: not backed up")
+    check(Settle.applying(diff, to: .possible(drivePath: "/d/b.jpg", reason: ""), driveSHA256: nil) == .possible(drivePath: "/d/b.jpg", reason: ""), "not the same only clears that one match")
+    check(Settle.applying(nil, to: possible, driveSHA256: "h") == possible, "no decision: unchanged")
     check(Settle.alongsideName(old: URL(fileURLWithPath: "/d/Bali 03.JPG"), ext: "HEIC") == "Bali 03 (from iPhone).HEIC", "alongside name")
     check(Settle.alongsideName(old: URL(fileURLWithPath: "/d/Bali 03"), ext: "") == "Bali 03 (from iPhone)", "alongside name without extension")
 

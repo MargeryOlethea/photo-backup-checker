@@ -7,13 +7,42 @@ public enum Settle {
     public enum Better: Equatable { case phone, drive }
     /// `sameClip`: a video matched on date and length; frames aren't compared, so the drive copy is never trashed by default.
     public enum Verdict: Equatable { case settle, driveBetter, differentPhoto, sameClip }
-    /// What to do with one possible copy. Every row gets one, so the whole list can be fixed in one go.
-    public enum Action: String, CaseIterable, Identifiable, Sendable {
-        case replace = "Replace", keepBoth = "Keep both", skip = "Skip"
-        public var id: String { rawValue }
+    /// What to do with one possible copy. `keepBoth` is never a suggestion or a Compare answer: `AppModel.settle`
+    /// switches to it when the drive file is already replaced or kept for another iPhone photo.
+    public enum Action: Sendable, Equatable { case replace, keepDrive, different, keepBoth }
+
+    /// A decision about one iPhone file that is remembered across checks: the drive's copy is kept as its backup
+    /// (`keepDrive`), or the two are not the same photo (`different`). Saved keyed by the iPhone file, so a re-shot
+    /// file at the same path never inherits it.
+    public struct Decision: Codable, Sendable, Equatable {
+        public enum Kind: String, Codable, Sendable { case keepDrive, different }
+        public var kind: Kind
+        public var drivePath: String
+        public var driveSize: Int64
+        /// keepDrive only: the drive copy's fingerprint when it was kept. Re-checked right before deleting from the iPhone.
+        public var driveSHA256: String?
+        public init(kind: Kind, drivePath: String, driveSize: Int64, driveSHA256: String? = nil) {
+            self.kind = kind; self.drivePath = drivePath; self.driveSize = driveSize; self.driveSHA256 = driveSHA256
+        }
     }
+
+    /// The status after a remembered decision. An exact copy always wins. A kept drive copy counts as backed up only
+    /// while that file's bytes are still the ones kept (`driveSHA256`: its fingerprint now, nil if missing or a
+    /// different size); "not the same" only clears the match it was made about.
+    public static func applying(_ d: Decision?, to s: Status, driveSHA256: String?) -> Status {
+        guard let d else { return s }
+        if case .verified = s { return s }
+        switch d.kind {
+        case .keepDrive:
+            return driveSHA256 != nil && driveSHA256 == d.driveSHA256 ? .verified(drivePath: d.drivePath) : s
+        case .different:
+            if case .possible(let p, _) = s, p == d.drivePath { return .none }
+            return s
+        }
+    }
+
     /// What makes a drive file "the one that was shown": its inode, size and change time.
-    public struct Identity: Equatable, Sendable { let inode: UInt64; let size: Int64; let modified: Date }
+    public struct Identity: Equatable, Sendable { let inode: UInt64; public let size: Int64; let modified: Date }
     public enum SettleError: Error { case driveFileChanged }
 
     public static func identity(of url: URL) throws -> Identity {
@@ -42,16 +71,19 @@ public enum Settle {
         return better == .phone ? .settle : .driveBetter
     }
 
-    /// How different two pictures look: both shrunk to 32×32 grey (colour-managed), mean absolute difference 0…1.
-    /// The default action for a verdict. Nothing is ever lost: "Replace" sends the old copy to the Trash,
-    /// "Keep both" adds the iPhone original next to it. Either way the photo turns green.
-    public static func suggested(for verdict: Verdict) -> Action {
+    /// What Fix does by itself. nil: not sure, the person compares the two (`reconciled`).
+    public static func suggested(for verdict: Verdict) -> Action? {
         switch verdict {
-        case .settle: .replace            // same picture, iPhone's is better: swap it in
-        case .driveBetter: .keepBoth      // same picture but the drive's is bigger: keep that, add the original
-        case .differentPhoto: .keepBoth   // not the same picture (or couldn't compare): never trash it
-        case .sameClip: .keepBoth         // probably the same video, but not checked frame by frame
+        case .settle: .replace              // same picture, iPhone's is better: swap it in
+        case .driveBetter: .keepDrive       // same picture, drive's is better: it counts as the backup
+        case .differentPhoto, .sameClip: nil
         }
+    }
+
+    /// After the person compared both: the same photo is settled like an automatic one; a different one is left to back up.
+    public static func reconciled(same: Bool, better: Better) -> Action {
+        guard same else { return .different }
+        return better == .phone ? .replace : .keepDrive
     }
 
     /// Adds the iPhone file next to `old` without touching it: as "<old stem>.<iPhone ext>", or
@@ -80,6 +112,7 @@ public enum Settle {
         return ext.isEmpty ? "\(stem) (from iPhone)" : "\(stem) (from iPhone).\(ext)"
     }
 
+    /// How different two pictures look: both shrunk to 32×32 grey (colour-managed), mean absolute difference 0…1.
     public static func pixelDifference(_ a: CGImage, _ b: CGImage) -> Double? {
         func grey(_ img: CGImage) -> [UInt8]? {
             var px = [UInt8](repeating: 0, count: 32 * 32)
