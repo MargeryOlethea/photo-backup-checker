@@ -7,8 +7,8 @@ public enum Settle {
     public enum Better: Equatable { case phone, drive }
     /// `sameClip`: a video matched on date and length; frames aren't compared, so the drive copy is never trashed by default.
     public enum Verdict: Equatable { case settle, driveBetter, differentPhoto, sameClip }
-    /// What to do with one possible copy. `keepBoth` is never offered: it is used when a second iPhone photo
-    /// matched the same drive file that the first one already replaced.
+    /// What to do with one possible copy. `keepBoth` is never a suggestion or a Compare answer: `AppModel.settle`
+    /// switches to it when the drive file is already replaced or kept for another iPhone photo.
     public enum Action: Sendable, Equatable { case replace, keepDrive, different, keepBoth }
 
     /// A decision about one iPhone file that is remembered across checks: the drive's copy is kept as its backup

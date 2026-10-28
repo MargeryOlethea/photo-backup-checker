@@ -482,7 +482,8 @@ final class AppModel {
         var byTime: [Int: [DriveFile]] = [:]
         for f in all { if let d = f.captureDate { byTime[Int(d.timeIntervalSince1970), default: []].append(f) } }
 
-        // Kept drive copies count only while their bytes are unchanged: re-fingerprint each (there are few).
+        // Kept drive copies count only while their bytes are unchanged: re-fingerprint each.
+        // ponytail: full re-read every check; skip when size+mtime match the kept file if kept videos make checks slow.
         let sizes = Dictionary(all.map { ($0.path, $0.size) }, uniquingKeysWith: { a, _ in a })
         var keptNow: [String: String] = [:]   // drive path → fingerprint now
         for item in media {
@@ -795,11 +796,12 @@ final class AppModel {
 
     /// Items whose drive match is only "possible": single photos, videos and Live Photos, as long as the
     /// drive file isn't the exact backup of something else.
+    /// Also excluded: drive files kept as the backup of another iPhone photo, even one since deleted from the iPhone.
     var settleCandidates: [ItemBundle] {
         let exactPaths = Set(memberStatus.values.compactMap { if case .verified(let p) = $0 { p } else { nil } })
         return bundles.filter { b in
             guard b.kind == .single || b.kind == .live, case .possible(let p, _)? = memberStatus[b.primary.id] else { return false }
-            return !exactPaths.contains(p)
+            return !exactPaths.contains(p) && !keptPaths(except: deviceKey(b.primary)).contains(p)
         }
     }
 
@@ -874,9 +876,11 @@ final class AppModel {
         var seenPaths = Set<String>()
         let rows: [(SettleRow, Settle.Action)] = settleRows.compactMap { r in
             guard let a = actions[r.id], r.identity != nil, case .possible(let p, _)? = memberStatus[r.item.id], p == r.drive.path else { return nil }
-            // Two iPhone photos matched to the same drive file: only the first may replace or keep it; the rest get
-            // their own original added next to it, so one drive file never stands in for two iPhone photos.
-            return (r, !seenPaths.insert(p).inserted && (a == .replace || a == .keepDrive) ? .keepBoth : a)
+            // One drive file never stands in for two iPhone photos: when it is already replaced or kept for another
+            // (in this batch, or kept earlier), this one gets its own original added next to it instead.
+            guard a == .replace || a == .keepDrive else { return (r, a) }
+            let taken = !seenPaths.insert(p).inserted || keptPaths(except: deviceKey(r.item)).contains(p)
+            return (r, taken ? .keepBoth : a)
         }
         startWork { [weak self] in
             guard let self else { return }
@@ -891,6 +895,7 @@ final class AppModel {
                     if action == .different {
                         self.decisions[self.deviceKey(r.item)] = Settle.Decision(kind: .different, drivePath: old.path, driveSize: r.drive.size)
                         self.memberStatus[r.item.id] = Status.none
+                        self.saveDecisions()
                         self.settleRows.removeAll { $0.id == r.id }
                         different += 1
                         continue
@@ -903,6 +908,7 @@ final class AppModel {
                         guard let hash, let size = r.identity?.size else { changed += 1; continue }
                         self.decisions[self.deviceKey(r.item)] = Settle.Decision(kind: .keepDrive, drivePath: old.path, driveSize: size, driveSHA256: hash)
                         self.memberStatus[r.item.id] = .verified(drivePath: old.path)
+                        self.saveDecisions()
                         keptDrive += 1
                     } else if action == .replace {
                         let out: Settle.Outcome
@@ -953,6 +959,17 @@ final class AppModel {
             let job = CopyJob(item: item, destName: item.name, bundleID: bundle.id, bundleMembers: bundle.members.map(\.name), read: self.phone.reader(id: item.id))
             return try await Settle.alongside(job, old: old)
         }
+    }
+
+    /// Drive files kept as the backup of some iPhone photo (other than `key`'s).
+    private func keptPaths(except key: String?) -> Set<String> {
+        Set(decisions.filter { $0.key != key && $0.value.kind == .keepDrive }.map(\.value.drivePath))
+    }
+
+    /// Written straight away: an item already shown green must not lose its decision if the app quits mid-batch.
+    private func saveDecisions() {
+        let url = appData.appendingPathComponent("settle-decisions.json"), decided = decisions
+        Self.saveQueue.async { try? JSONStore.save(decided, to: url) }
     }
 
     /// The kept drive copy this item counts as backed up by, if that's why it's green (not an exact copy).

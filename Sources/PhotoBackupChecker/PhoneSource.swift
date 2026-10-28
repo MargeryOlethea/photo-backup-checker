@@ -110,7 +110,7 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
     }
 
     /// Deletes from the phone. Returns item id → nil on success, or the failure message.
-    /// Throws `TimedOut` when the phone doesn't answer within 30 s, so the caller can pause and ask again.
+    /// Throws `TimedOut` when the phone doesn't answer in time (30 s, plus 10 s per extra file), so the caller can pause and ask again.
     func delete(ids: [String]) async throws -> [String: String?] {
         if !demoFiles.isEmpty {   // demo: drop from the list only; the sample files stay
             items.removeAll { ids.contains($0.id) }
@@ -118,6 +118,8 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
             return Dictionary(uniqueKeysWithValues: ids.map { ($0, nil) })
         }
         guard let device else { return Dictionary(uniqueKeysWithValues: ids.map { ($0, "iPhone disconnected") }) }
+        // Only a fully loaded list can say a file is already gone.
+        guard catalogReady else { return Dictionary(uniqueKeysWithValues: ids.map { ($0, "iPhone still loading its photo list") }) }
         // Files already gone (an earlier request that timed out went through after all) aren't asked for again.
         // Captured now: the phone may report the removal (and drop them from `files`) before the answer arrives.
         let present = ids.compactMap { id in files[id].map { (id, $0) } }
@@ -127,7 +129,7 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
         // Success is only what the phone lists as deleted, matched by object identity, not by name.
         let deleted: [ObjectIdentifier]
         do {
-            deleted = try await Timeout.callback(seconds: 30, { done in
+            deleted = try await Timeout.callback(seconds: 30 + 10 * Double(list.count - 1), { done in
                 _ = dev.requestDeleteFiles(list, deleteFailed: { _ in }, completion: { result, _ in
                     done(.success((result[.successful] ?? []).map(ObjectIdentifier.init)))
                 })

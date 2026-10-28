@@ -43,12 +43,15 @@ func timeoutTests() async {
     check(Date().timeIntervalSince(stopAt) < 1, "Stop doesn't wait for the time limit")
 
     // Already stopped before the wait begins: ends at once too.
+    final class Flag: @unchecked Sendable { var started = false }
+    let flag = Flag()
     let pre = Task {
         try? await Task.sleep(nanoseconds: 200_000_000)
-        return try await Timeout.callback(seconds: 5) { (_: @escaping @Sendable (Result<Int, Error>) -> Void) in }
+        return try await Timeout.callback(seconds: 5) { (_: @escaping @Sendable (Result<Int, Error>) -> Void) in flag.started = true }
     }
     pre.cancel()
     let preAt = Date()
     _ = try? await pre.value
     check(Date().timeIntervalSince(preAt) < 1, "a wait started after Stop ends at once")
+    check(!flag.started, "after Stop the request (e.g. a delete) is never sent")
 }

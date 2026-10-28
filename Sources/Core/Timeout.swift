@@ -10,7 +10,7 @@ public enum Timeout {
         let once = Once<T>()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { cont in
-                once.set(cont)
+                guard once.set(cont) else { return }   // already stopped: never send the request
                 DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { once.finish(.failure(TimedOut())) }
                 start { once.finish($0) }
             }
@@ -22,10 +22,12 @@ public enum Timeout {
         private var cont: CheckedContinuation<T, Error>?
         private var early: Result<T, Error>?   // cancelled before the wait began
         private var done = false
-        func set(_ c: CheckedContinuation<T, Error>) {
+        /// False when it already ended (cancelled before the wait began): the caller must not start anything.
+        func set(_ c: CheckedContinuation<T, Error>) -> Bool {
             lock.lock()
-            guard let early else { cont = c; lock.unlock(); return }
+            guard let early else { cont = c; lock.unlock(); return true }
             done = true; lock.unlock(); c.resume(with: early)
+            return false
         }
         func finish(_ r: Result<T, Error>) {
             lock.lock()
