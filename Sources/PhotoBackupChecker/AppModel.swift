@@ -283,6 +283,7 @@ final class AppModel {
             bundles = newBundles
             selection = selection.intersection(Set(bundles.map(\.id)))
             recomputeBundleStatuses()
+            pruneCleanup()
         }
         // An open preview of something that's no longer on this phone closes.
         if case .preview(let b)? = sheet, !bundles.contains(where: { $0.id == b.id && $0 == b }) { sheet = nil }
@@ -675,6 +676,22 @@ final class AppModel {
         }
         info[pick.best, default: CleanupInfo()].best = true
         info[pick.best, default: CleanupInfo()].bestReason = byJev ? "A close call; Jev picked this one" : BestPick.reason(scores[pick.best]!)
+    }
+
+    /// After items left the phone: a duplicate with no twin left, or a similar group down to one shot, is nothing to
+    /// clean up any more, and a group that lost its ★ gets a new one from the cached scores.
+    private func pruneCleanup() {
+        let alive = Set(bundles.map(\.id))
+        guard cleanup.keys.contains(where: { !alive.contains($0) }) else { return }
+        var info = cleanup.filter { alive.contains($0.key) }
+        var twins: [String: [String]] = [:]
+        for b in bundles where info[b.id]?.duplicate == true { twins[knownHash(b.primary) ?? b.id, default: []].append(b.id) }
+        for ids in twins.values where ids.count < 2 { info[ids[0]]?.duplicate = false }
+        for g in Dictionary(grouping: bundles.filter { info[$0.id]?.similarGroup != nil }, by: { info[$0.id]!.similarGroup! }).values {
+            if g.count < 2 { for b in g { info[b.id]?.similarGroup = nil; info[b.id]?.best = false; info[b.id]?.bestReason = nil } }
+            else { markBest(g, into: &info) }
+        }
+        cleanup = info
     }
 
     /// Apple's score for one photo, judged on its preview, or nil if it can't be scored now.
