@@ -145,7 +145,8 @@ final class AppModel {
         hashCache = JSONStore.load([String: String].self, from: appData.appendingPathComponent("phone-hashes.json"))
         jevCache = JSONStore.load([String: JevResult].self, from: appData.appendingPathComponent("jev-verdicts.json"))
         printCache = JSONStore.load([String: Data].self, from: appData.appendingPathComponent("similar-prints.json"))
-        scoreCache = JSONStore.load([String: ShotScore].self, from: appData.appendingPathComponent("shot-scores.json"))
+        scoreCache = JSONStore.load([String: ShotScore].self, from: appData.appendingPathComponent("preview-scores.json"))
+        try? FileManager.default.removeItem(at: appData.appendingPathComponent("shot-scores.json"))   // scores from whole photos; no longer comparable
         jevPicks = JSONStore.load([String: String].self, from: appData.appendingPathComponent("jev-picks.json"))
         decisions = JSONStore.load([String: Settle.Decision].self, from: appData.appendingPathComponent("settle-decisions.json"))
         renders = RenderTries.load(from: appData.appendingPathComponent("bad-renders.json"))
@@ -611,9 +612,8 @@ final class AppModel {
         for item in groups.joined().compactMap({ byID[$0]?.primary }) where !item.isVideo && scoreCache[deviceKey(item)] == nil && seen.insert(item.id).inserted {
             need.append((item, deviceKey(item)))
         }
-        // Stored files come from the iPhone a few at a time; scoring runs off the main thread so the window stays responsive.
-        // Edited versions the phone has to make go last and one by one: one it can't make jams the phone until a replug.
-        let stored = need.filter { !$0.item.isEditedRender }, edits = need.filter { $0.item.isEditedRender }
+        // Scored from the previews (mostly already on the Mac), a few at a time off the main thread. Never the whole
+        // photo: an edited version the iPhone can't make would jam the connection until a replug, just for a star.
         var done = 0
         let phaseStart = Date()
         Diag.log("pick best: \(groups.count) groups, \(groups.joined().count) shots, \(need.count) to score")
@@ -626,7 +626,7 @@ final class AppModel {
             saveIfDue()
         }
         try await withThrowingTaskGroup(of: (String, ShotScore?).self) { group in
-            var it = stored.makeIterator()
+            var it = need.makeIterator()
             func add() -> Bool {
                 guard let (item, key) = it.next() else { return false }
                 group.addTask { @MainActor in (key, try await self.shotScore(item)) }
@@ -639,45 +639,59 @@ final class AppModel {
                 _ = add()
             }
         }
-        for (item, key) in edits {
-            try Task.checkCancellation()
-            finished(key, try await shotScore(item))
-        }
-        let key = Jev.loadKey(from: appData)
-        for g in groups {
-            let photos = g.compactMap { byID[$0] }.filter { !$0.primary.isVideo }
-            var scores: [String: ShotScore] = [:]
-            for b in photos { scores[b.id] = scoreCache[deviceKey(b.primary)] }
-            guard var pick = BestPick.pick(group: photos.map(\.id), scores: scores),
-                  let a = byID[pick.best]?.primary, let b = byID[pick.runnerUp]?.primary else { continue }
-            var byJev = false
-            if pick.closeCall, let key {
-                let k = [deviceKey(a), deviceKey(b)].sorted().joined(separator: "‖")
-                if jevPicks[k] == nil {
-                    progress = Progress(label: "Asking Jev about close calls", done: 0, total: 0)
-                    if let da = try await fullDataOrSkip(a), let db = try await fullDataOrSkip(b) {
-                        // Network trouble: ask again next time. Jev unsure: remembered as "" and Apple's pick stands.
-                        do { jevPicks[k] = try await Jev.pick(first: da, second: db, key: key).map { $0 == 0 ? deviceKey(a) : deviceKey(b) } ?? "" }
-                        catch { Diag.log("Jev pick failed: \(error)") }
-                    }
-                }
-                if jevPicks[k] == deviceKey(b) { swap(&pick.best, &pick.runnerUp) }
-                byJev = jevPicks[k]?.isEmpty == false
+        // Close calls Jev hasn't answered yet are asked now (needs the key and the network); the ★ itself comes from the caches.
+        if let key = Jev.loadKey(from: appData) {
+            for g in groups {
+                let photos = g.compactMap { byID[$0] }.filter { !$0.primary.isVideo }
+                guard let pick = BestPick.pick(group: photos.map(\.id), scores: scores(photos)), pick.closeCall,
+                      let a = byID[pick.best]?.primary, let b = byID[pick.runnerUp]?.primary, jevPicks[jevKey(a, b)] == nil else { continue }
+                progress = Progress(label: "Asking Jev about close calls", done: 0, total: 0)
+                guard let da = try await jevData(a), let db = try await jevData(b) else { continue }
+                // Network trouble: ask again next time. Jev unsure: remembered as "" and Apple's pick stands.
+                do { jevPicks[jevKey(a, b)] = try await Jev.pick(first: da, second: db, key: key).map { $0 == 0 ? deviceKey(a) : deviceKey(b) } ?? "" }
+                catch { Diag.log("Jev pick failed: \(error)") }
             }
-            info[pick.best, default: CleanupInfo()].best = true
-            info[pick.best, default: CleanupInfo()].bestReason = byJev ? "A close call; Jev picked this one" : BestPick.reason(scores[pick.best]!)
         }
+        for g in groups { markBest(g.compactMap { byID[$0] }, into: &info) }
     }
 
-    /// Apple's score for one photo, or nil if it can't be read or scored now.
+    private func scores(_ photos: [ItemBundle]) -> [String: ShotScore] {
+        Dictionary(uniqueKeysWithValues: photos.compactMap { b in scoreCache[deviceKey(b.primary)].map { (b.id, $0) } })
+    }
+    private func jevKey(_ a: PhoneItem, _ b: PhoneItem) -> String { [deviceKey(a), deviceKey(b)].sorted().joined(separator: "‖") }
+
+    /// ★ for one similar group, from the cached scores and Jev's remembered close-call answers. Videos never get it.
+    private func markBest(_ group: [ItemBundle], into info: inout [String: CleanupInfo]) {
+        let photos = group.filter { !$0.primary.isVideo }
+        for b in photos { info[b.id]?.best = false; info[b.id]?.bestReason = nil }
+        let scores = scores(photos)
+        guard var pick = BestPick.pick(group: photos.map(\.id), scores: scores),
+              let a = photos.first(where: { $0.id == pick.best })?.primary, let b = photos.first(where: { $0.id == pick.runnerUp })?.primary else { return }
+        var byJev = false
+        if pick.closeCall {
+            let jev = jevPicks[jevKey(a, b)]
+            if jev == deviceKey(b) { swap(&pick.best, &pick.runnerUp) }
+            byJev = jev?.isEmpty == false
+        }
+        info[pick.best, default: CleanupInfo()].best = true
+        info[pick.best, default: CleanupInfo()].bestReason = byJev ? "A close call; Jev picked this one" : BestPick.reason(scores[pick.best]!)
+    }
+
+    /// Apple's score for one photo, judged on its preview, or nil if it can't be scored now.
     private func shotScore(_ item: PhoneItem) async throws -> ShotScore? {
-        guard let data = try await fullDataOrSkip(item) else { return nil }
-        return await Task.detached { Self.downscaled(data, to: 1600).flatMap(BestPick.score(cgImage:)) }.value
+        guard let img = await thumbnail(for: item) else { return nil }
+        return await Task.detached { BestPick.score(cgImage: img) }.value
+    }
+
+    /// What Jev gets to look at: the whole photo, except for an edited version, where it gets the preview
+    /// (asking the iPhone to make the whole edited version can jam the connection).
+    private func jevData(_ item: PhoneItem) async throws -> Data? {
+        item.isEditedRender ? await thumbnailData(for: item) : try await fullDataOrSkip(item)
     }
 
     /// A whole photo from the phone, or nil if it can't be read now (only cancelling is passed on).
-    /// Edited versions the phone can't make are skipped (one try per run); a hang jams the connection, which the
-    /// next step clears by reconnecting.
+    /// Edited versions the phone can't make are skipped (one try, ever); a hang jams the connection, which the
+    /// next step clears by asking for a replug.
     private func fullDataOrSkip(_ item: PhoneItem) async throws -> Data? {
         guard renders.shouldTry(deviceKey(item)) else { return nil }
         do { return try await resilient(drive: false, phone: true, maxTimeouts: 1) { try await self.phone.fullData(id: item.id) } }
@@ -733,7 +747,7 @@ final class AppModel {
             try? JSONStore.save(jev, to: dir.appendingPathComponent("jev-verdicts.json"))
             try? JSONStore.save(prints, to: dir.appendingPathComponent("similar-prints.json"))
             try? JSONStore.save(bad, to: dir.appendingPathComponent("bad-renders.json"))
-            try? JSONStore.save(scores, to: dir.appendingPathComponent("shot-scores.json"))
+            try? JSONStore.save(scores, to: dir.appendingPathComponent("preview-scores.json"))
             try? JSONStore.save(picks, to: dir.appendingPathComponent("jev-picks.json"))
         }
     }
@@ -741,13 +755,20 @@ final class AppModel {
     /// Key for data tied to one specific iPhone (thumbnails, similar-shot prints, Jev verdicts).
     private func deviceKey(_ i: PhoneItem) -> String { "\(deviceID ?? "?")|" + cacheKey(i) }
 
-    /// Grid thumbnail: from memory, else saved on the Mac, else asked from the iPhone (then saved).
+    /// Preview (JPEG data): saved on the Mac, else asked from the iPhone (then saved).
+    private func thumbnailData(for item: PhoneItem) async -> Data? {
+        let key = deviceKey(item)
+        if let d = thumbStore.data(for: key) { return d }
+        guard let d = await phone.thumbnailData(id: item.id) else { return nil }
+        thumbStore.put(d, for: key)
+        return d
+    }
+
+    /// Grid thumbnail: from memory, else the saved or fetched preview.
     func thumbnail(for item: PhoneItem) async -> CGImage? {
         let key = deviceKey(item)
         if let img = thumbMemory[key] { return img }
-        var data = thumbStore.data(for: key)
-        if data == nil, let d = await phone.thumbnailData(id: item.id) { thumbStore.put(d, for: key); data = d }
-        guard let data, let src = CGImageSourceCreateWithData(data as CFData, nil),
+        guard let data = await thumbnailData(for: item), let src = CGImageSourceCreateWithData(data as CFData, nil),
               let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
         thumbMemory[key] = img
         thumbOrder.append(key)

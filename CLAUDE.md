@@ -32,7 +32,7 @@ Two targets with a hard boundary:
 1. `PhoneSource` turns `ICCameraFile`s into `PhoneItem`s; `Bundler.bundles` groups them into `ItemBundle`s (Live Photo pairs, edited renders + originals, bursts, sidecar `.AAE` files) keyed by `folder/stem`.
 2. `DriveIndex` (actor) walks the drive, reuses cached `DriveFile`s by `(path, size, mtime)`, and SHA-256s only drive files whose size matches some phone file.
 3. `AppModel.runCheck` fingerprints phone files that share a size with a drive file (or with another phone file, for duplicate detection), then `Matcher.status` decides per item: `.verified` (same size + same hash) / `.possible` (capture date within 1 s plus same aspect ratio or duration) / `.none`. `Matcher.bundleStatus` rolls members up: a bundle is only green if every media member is green.
-4. Clean-up: `Cleanup.exactDuplicates` by hash, `Cleanup.similarGroups` via Vision feature prints within a 10-minute window, `BestPick` scores each similar group (Vision aesthetics + face quality); close calls optionally go to Jev (TypeSafe API).
+4. Clean-up: `Cleanup.exactDuplicates` by hash, `Cleanup.similarGroups` via Vision feature prints within a 10-minute window, `BestPick` scores each similar group (Vision aesthetics + face quality) from the cached previews, never the whole photo; close calls optionally go to Jev (TypeSafe API).
 
 ### Safety invariants (do not weaken)
 
@@ -49,7 +49,7 @@ Two targets with a hard boundary:
 
 ### Persistence
 
-Everything lives in `~/Library/Application Support/PhotoBackupChecker/` (demo mode uses a `demo/` subfolder wiped on launch): `drive-index.json`, `phone-hashes.json`, `jev-verdicts.json`, `similar-prints.json`, `shot-scores.json`, `jev-picks.json`, `settle-decisions.json`, `bad-renders.json` (edited version key → failed tries), `thumbs/`, `debug.log`, `deleted-from-iphone.txt`, and the optional `jev.key`. The chosen drive folder is in `UserDefaults` key `driveRoot`; the default is the user's specific external volume path in `AppModel.init`. Each backup folder on the drive gets a `.photo-backup-receipt.json`.
+Everything lives in `~/Library/Application Support/PhotoBackupChecker/` (demo mode uses a `demo/` subfolder wiped on launch): `drive-index.json`, `phone-hashes.json`, `jev-verdicts.json`, `similar-prints.json`, `preview-scores.json`, `jev-picks.json`, `settle-decisions.json`, `bad-renders.json` (edited version key → failed tries), `thumbs/`, `debug.log`, `deleted-from-iphone.txt`, and the optional `jev.key`. The chosen drive folder is in `UserDefaults` key `driveRoot`; the default is the user's specific external volume path in `AppModel.init`. Each backup folder on the drive gets a `.photo-backup-receipt.json`.
 
 ### Conventions
 
