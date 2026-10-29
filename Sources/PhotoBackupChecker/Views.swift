@@ -739,6 +739,7 @@ struct PreviewView: View {
     let onOpen: (ItemBundle) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var file: URL?
+    @State private var image: CGImage?    // made off the main thread, so the window doesn't stall while flipping
     @State private var error: String?
     @State private var player: AVPlayer?   // kept here so a re-render doesn't restart the video
 
@@ -782,7 +783,8 @@ struct PreviewView: View {
             Group {
                 if let file {
                     if bundle.primary.isVideo, let player { VideoPlayer(player: player) }
-                    else if let img = NSImage(contentsOf: file) { Image(nsImage: img).resizable().scaledToFit() }
+                    else if let image { Image(decorative: image, scale: 1).resizable().scaledToFit() }
+                    else if bundle.primary.isVideo { ProgressView().colorScheme(.dark) }
                     else { Text("Can't show this file.").foregroundStyle(.white) }
                 } else if let error { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
                 else { ProgressView("Loading from iPhone…").colorScheme(.dark) }
@@ -792,11 +794,14 @@ struct PreviewView: View {
         }
         .padding(16)
         .task(id: bundle.id) {
-            player?.pause(); player = nil; file = nil; error = nil
+            player?.pause(); player = nil; file = nil; image = nil; error = nil
             do {
                 let url = try await model.previewFile(for: bundle.primary)
+                let isVideo = bundle.primary.isVideo
+                let img = isVideo ? nil : await Task.detached { AppModel.downscaled(url, to: 3000) }.value
                 guard !Task.isCancelled else { return }   // moved on to another item meanwhile
-                if bundle.primary.isVideo { player = AVPlayer(url: url) }
+                if isVideo { player = AVPlayer(url: url) }
+                image = img
                 file = url
             } catch { self.error = AppModel.describe(error) }
         }

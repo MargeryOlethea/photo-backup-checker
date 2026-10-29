@@ -46,7 +46,9 @@ enum ActiveSheet: Identifiable {
     case preview(ItemBundle), backup, delete, settle(only: Set<String>?), readyList
     var id: String {
         switch self {
-        case .preview(let b): "preview \(b.id)"
+        // One id for every item: the arrows swap the photo inside the open window. A per-item id closed and reopened
+        // the window on every press, which lagged, and a press during the swap went to the closing window.
+        case .preview: "preview"
         case .backup: "backup"
         case .delete: "delete"
         case .settle: "settle"
@@ -1376,6 +1378,7 @@ final class AppModel {
     /// `previewCap` bytes, least recently opened dropped first), so reopening a photo doesn't fetch it again.
     static let previewCap: Int64 = 2_000_000_000
     private var previewDir: URL { appData.appendingPathComponent("previews") }
+    @ObservationIgnored private var previewLoads: [URL: Task<URL, Error>] = [:]
     func previewFile(for item: PhoneItem) async throws -> URL {
         let fm = FileManager.default
         let url = previewDir.appendingPathComponent(ThumbnailStore.fileName(for: cacheKey(item)) + "." + item.ext)
@@ -1383,6 +1386,16 @@ final class AppModel {
             try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)   // most recently opened
             return url
         }
+        // Moving on to the next item doesn't stop the copy: coming back waits for the same copy instead of starting over.
+        if let running = previewLoads[url] { return try await running.value }
+        let load = Task { try await self.copyForPreview(item, to: url) }
+        previewLoads[url] = load
+        defer { previewLoads[url] = nil }
+        return try await load.value
+    }
+
+    private func copyForPreview(_ item: PhoneItem, to url: URL) async throws -> URL {
+        let fm = FileManager.default
         try? fm.createDirectory(at: previewDir, withIntermediateDirectories: true)
         let part = previewDir.appendingPathComponent(UUID().uuidString + ".part")
         fm.createFile(atPath: part.path, contents: nil)
@@ -1392,7 +1405,6 @@ final class AppModel {
             let read = phone.reader(id: item.id)
             var off: Int64 = 0
             while off < item.size {
-                try Task.checkCancellation()   // preview closed early: stop and remove the partial copy
                 let len = Int(min(Int64(Fingerprint.chunkSize), item.size - off))
                 try h.write(contentsOf: try await read(off, len))
                 off += Int64(len)
