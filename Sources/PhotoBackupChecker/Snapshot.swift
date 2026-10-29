@@ -4,6 +4,7 @@ import Core
 /// Testing aid (PBC_SNAPSHOT_DIR, demo only). Each line written to <dir>/request is one command:
 ///   snap <name>          save every open window as <dir>/<name>-<n>.png
 ///   filter <Filter name> show that filter        select <n> / select none / select first-of <Filter name> <n>
+///   group <Grouping name>  e.g. "group By month"
 ///   sheet backup|delete|settle|ready|preview|none   open or close a sheet
 ///   do-settle [same|different] / do-backup <folder> / recheck / do-delete green|all / status (writes status.txt)   run the real actions
 /// Lets the screens be checked without screen-recording permission.
@@ -32,6 +33,7 @@ enum Snapshot {
                 try? rep.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("\(arg)-\(i).png"))
             }
         case "filter": if let f = Filter(rawValue: arg) { model.filter = f }
+        case "group": if let g = Grouping(rawValue: arg) { model.grouping = g }
         case "select":
             if arg == "none" { model.selection = [] }
             else if arg.hasPrefix("first-of ") {

@@ -89,6 +89,7 @@ struct ContentView: View {
 
     private var grid: some View {
         let items = model.visible
+        let sections = model.grouping.sections(items, oldestFirst: model.sort == .oldest)   // one unnamed section when not grouped
         return Group {
             if items.isEmpty {
                 VStack(spacing: 8) {
@@ -99,8 +100,19 @@ struct ContentView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: TileView.side), spacing: 10)], spacing: 10) {
-                        ForEach(items) { b in TileView(model: model, bundle: b, list: items).reportFrame(b.id) }
+                    LazyVStack(alignment: .leading, spacing: 10, pinnedViews: .sectionHeaders) {
+                        ForEach(sections) { s in
+                            Section {
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: TileView.side), spacing: 10)], spacing: 10) {
+                                    ForEach(s.items) { b in TileView(model: model, bundle: b, list: items).reportFrame(b.id) }
+                                }
+                            } header: {
+                                if let title = s.title {
+                                    Text(title).font(.headline).padding(.vertical, 6)
+                                        .frame(maxWidth: .infinity, alignment: .leading).background(.bar)
+                                }
+                            }
+                        }
                     }
                     .padding(14)
                     .dragToSelect(model: model)
@@ -245,6 +257,10 @@ struct FilterBar: View {
                 Picker("Sort", selection: $model.sort) { ForEach(SortOrder.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.inline)
             } label: { Label(model.sort.rawValue, systemImage: "arrow.up.arrow.down") }
                 .menuStyle(.borderlessButton).fixedSize().help("Sort order")
+            Menu {
+                Picker("Group", selection: $model.grouping) { ForEach(Grouping.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.inline)
+            } label: { Label(model.grouping.rawValue, systemImage: "calendar") }
+                .menuStyle(.borderlessButton).fixedSize().help("Group by day, week or month")
             Button { model.selection.formUnion(model.visible.map(\.id)) } label: {
                 if compact { Image(systemName: "checkmark.circle") } else { Text("Select all \(shown)") }
             }

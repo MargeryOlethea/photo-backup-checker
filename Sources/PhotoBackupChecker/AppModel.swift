@@ -86,6 +86,9 @@ final class AppModel {
     var sheet: ActiveSheet?
     var filter: Filter = .all
     var sort: SortOrder = .newest
+    var grouping = Grouping(rawValue: UserDefaults.standard.string(forKey: "grouping") ?? "") ?? .none {
+        didSet { UserDefaults.standard.set(grouping.rawValue, forKey: "grouping") }
+    }
     var progress: Progress?
     var message: String?
     private(set) var pause: Pause?
