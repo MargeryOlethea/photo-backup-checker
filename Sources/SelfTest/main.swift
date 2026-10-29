@@ -1,11 +1,14 @@
 import Foundation
 
 namingTests()
+folderPrefixTests()
+pathInsideTests()
 await indexTests()
 matchTests()
 await writerTests()
 await deleteGateTests()
 cleanupTests()
+keeperTests()
 jevTests()
 await timeoutTests()
 await indexSafetyTests()

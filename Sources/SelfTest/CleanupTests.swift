@@ -20,3 +20,12 @@ func cleanupTests() {
     check(!groups.contains { $0.contains("far") }, "far pair not grouped")
     check(groups.contains(["b1", "b2"]), "burst members grouped regardless of distance")
 }
+
+func keeperTests() {
+    let groups = [["old", "dup1", "dup2"], ["star", "s1"]]
+    check(Cleanup.keepers(selected: ["old", "dup1", "dup2", "star", "s1"], groups: groups) == ["old", "star"], "a fully selected group keeps its first member")
+    check(Cleanup.keepers(selected: ["dup1", "dup2", "s1"], groups: groups).isEmpty, "a group with an unselected member keeps nothing extra")
+    check(Cleanup.keepers(selected: [], groups: groups).isEmpty, "nothing selected, nothing kept")
+    // A photo that is both a duplicate and a similar shot: keepers of both groups stay.
+    check(Cleanup.keepers(selected: ["a", "b", "c"], groups: [["a", "b"], ["c", "b"]]) == ["a", "c"], "overlapping groups each keep their own")
+}

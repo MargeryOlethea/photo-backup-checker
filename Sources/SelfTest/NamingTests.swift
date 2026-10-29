@@ -1,3 +1,4 @@
+import Foundation
 import Core
 
 func namingTests() {
@@ -23,4 +24,24 @@ func namingTests() {
         check(Naming.validateFolderName(bad) != nil, "rejects folder name '\(bad)'")
     }
     check(Naming.validateFolderName("2026-10 Bali") == nil, "accepts normal folder name")
+}
+
+func folderPrefixTests() {
+    var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(identifier: "UTC")!
+    func d(_ s: String) -> Date { ISO8601DateFormatter().date(from: s + "T10:00:00Z")! }
+    check(Naming.folderPrefix(dates: [d("2026-10-05"), d("2026-10-05")], calendar: cal) == "2026-10-05 ", "one day: year-month-day")
+    check(Naming.folderPrefix(dates: [d("2026-10-05"), d("2026-10-20")], calendar: cal) == "2026-10 ", "one month: year-month")
+    check(Naming.folderPrefix(dates: [d("2026-03-05"), d("2026-10-05")], calendar: cal) == "2026 ", "one year, same day number in two months: year")
+    check(Naming.folderPrefix(dates: [d("2025-10-05"), d("2026-10-05")], calendar: cal) == "", "several years: no suggestion")
+    check(Naming.folderPrefix(dates: [], calendar: cal) == "", "no dates: no suggestion")
+}
+
+func pathInsideTests() {
+    let root = URL(fileURLWithPath: "/Volumes/D/Memories")
+    check(Naming.pathInside(root, folder: URL(fileURLWithPath: "/Volumes/D/Memories/2026-10 Bali")) == "2026-10 Bali", "a folder inside the backup folder")
+    check(Naming.pathInside(root, folder: URL(fileURLWithPath: "/Volumes/D/Memories/2024/Bali")) == "2024/Bali", "a folder inside a folder")
+    check(Naming.pathInside(root, folder: URL(fileURLWithPath: "/Volumes/D/Other")) == nil, "a folder outside is refused")
+    check(Naming.pathInside(root, folder: root) == nil, "the backup folder itself is refused")
+    check(Naming.pathInside(root, folder: URL(fileURLWithPath: "/Volumes/D/Memories2/x")) == nil, "a look-alike name is outside")
+    check(Naming.pathInside(root, folder: URL(fileURLWithPath: "/Volumes/D/Memories/a/../../Other")) == nil, "climbing out with .. is outside")
 }

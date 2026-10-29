@@ -2,6 +2,25 @@ import Foundation
 
 /// Folder-name rules and "<label> NN.ext" numbering for backup folders.
 public enum Naming {
+    /// A folder name to start from, by how spread out the photos are: one day "2026-10-05 ", one month "2026-10 ",
+    /// one year "2026 ", several years "". Photos without a date don't count.
+    public static func folderPrefix(dates: [Date], calendar: Calendar = .current) -> String {
+        let parts = dates.map { calendar.dateComponents([.year, .month, .day], from: $0) }
+        guard let first = parts.first, let y = first.year, let m = first.month, let d = first.day else { return "" }
+        if Set(parts.map(\.year)).count > 1 { return "" }
+        if Set(parts.map(\.month)).count > 1 { return String(format: "%04d ", y) }
+        if Set(parts.map(\.day)).count > 1 { return String(format: "%04d-%02d ", y, m) }
+        return String(format: "%04d-%02d-%02d ", y, m, d)
+    }
+
+    /// Where `folder` sits inside the backup folder, e.g. "2024/Bali"; nil when it is outside it or is the backup folder itself.
+    public static func pathInside(_ root: URL, folder: URL) -> String? {
+        let r = root.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+        let f = folder.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+        guard f.count > r.count, Array(f.prefix(r.count)) == r else { return nil }
+        return f.dropFirst(r.count).joined(separator: "/")
+    }
+
     /// nil when the name is usable; otherwise a message for the owner.
     public static func validateFolderName(_ s: String) -> String? {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)

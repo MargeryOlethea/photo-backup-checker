@@ -40,7 +40,7 @@ struct ContentView: View {
             } else if model.bundles.isEmpty && !model.phone.catalogReady {
                 placeholder("photo.on.rectangle.angled", "Reading your iPhone…", "This takes a few seconds.", spinner: true)
             } else {
-                SummaryCards(model: model)
+                if model.showsBackup { SummaryCards(model: model) }
                 FilterBar(model: model)
                 Divider()
                 if model.filter == .cleanup { CleanupView(model: model) } else { grid }
@@ -239,7 +239,7 @@ struct FilterBar: View {
         let shown = model.visible.count
         HStack(spacing: 12) {
             Picker("Show", selection: $model.filter) {
-                ForEach(Filter.allCases) { Text($0.short).tag($0) }
+                ForEach(Filter.allCases.filter { model.showsBackup || !$0.needsDrive }) { Text($0.short).tag($0) }
             }
             .pickerStyle(.segmented).labelsHidden().fixedSize()
             Spacer(minLength: 8)
@@ -357,9 +357,10 @@ struct DeleteSheet: View {
     // What this sheet shows is fixed when it opens; consent covers exactly these items.
     @State private var all: [ItemBundle] = []
     @State private var unbacked: [ItemBundle] = []
+    @State private var tidy: [ItemBundle] = []
 
     var body: some View {
-        let green = all.filter { !unbacked.contains($0) }
+        let green = all.filter { !unbacked.contains($0) && !tidy.contains($0) }
         let possible = unbacked.filter { if case .possible = model.status(of: $0) { true } else { false } }.count
         let macCount = all.filter { !$0.onlyPhoneCanDelete }.count
         let phoneCount = all.count - macCount
@@ -377,6 +378,15 @@ struct DeleteSheet: View {
                           systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green).fixedSize(horizontal: false, vertical: true)
                     rows(green)
+                }
+            }
+            if !tidy.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("\(tidy.count) duplicate\(tidy.count == 1 ? "" : "s") or similar shot\(tidy.count == 1 ? "" : "s"). One of each always stays on your iPhone (the oldest copy, or the ★). Each duplicate is checked against its copy right before it's deleted.",
+                          systemImage: "square.on.square")
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Similar shots aren't copies: once deleted, they're gone.").font(.callout).foregroundStyle(.secondary)
+                    rows(tidy)
                 }
             }
             if !unbacked.isEmpty {
@@ -413,7 +423,7 @@ struct DeleteSheet: View {
         }
         .padding(22)
         .frame(width: 600)
-        .onAppear { all = model.selectedBundles; unbacked = model.selectedUnbacked }
+        .onAppear { all = model.selectedBundles; unbacked = model.selectedNeedsConsent; tidy = model.selectedCleanup }
     }
 
     @ViewBuilder private func rows(_ list: [ItemBundle]) -> some View {
@@ -624,7 +634,7 @@ struct TileView: View {
     @State private var hover = false
 
     var body: some View {
-        let status = model.status(of: bundle)
+        let status: Status? = model.showsBackup ? model.status(of: bundle) : nil
         let info = model.cleanup[bundle.id]
         let selected = model.selection.contains(bundle.id)
         let shape = RoundedRectangle(cornerRadius: Radius.tile)
@@ -662,7 +672,7 @@ struct TileView: View {
             .allowsHitTesting(false)
 
             HStack(spacing: 4) {
-                statusIcon(status)
+                if let status { statusIcon(status) }
                 Spacer()
                 if let d = bundle.primary.duration {
                     Text(String(format: "%d:%02d", Int(d) / 60, Int(d) % 60)).font(.caption2.weight(.bold)).monospacedDigit()
@@ -689,11 +699,11 @@ struct TileView: View {
             .frame(width: Self.side, height: Self.side, alignment: .topTrailing)
         }
         .frame(width: Self.side, height: Self.side)
-        .overlay(shape.strokeBorder(selected ? Color.accentColor : (status.color ?? .clear).opacity(0.9), lineWidth: selected ? 3 : 2))
+        .overlay(shape.strokeBorder(selected ? Color.accentColor : (status?.color ?? .clear).opacity(0.9), lineWidth: selected ? 3 : 2))
         .scaleEffect(hover ? 1.02 : 1)
         .animation(.easeOut(duration: 0.12), value: hover)
         .onHover { hover = $0 }
-        .help([bundle.primary.name, bundle.primary.captureDate?.formatted(date: .abbreviated, time: .shortened), gb(bundle.totalSize), status.label,
+        .help([bundle.primary.name, bundle.primary.captureDate?.formatted(date: .abbreviated, time: .shortened), gb(bundle.totalSize), status?.label,
                bundle.onlyPhoneCanDelete ? "Deleted via the iPhone Shortcut" : "Deleted by the Mac"]
             .compactMap { $0 }.joined(separator: " · "))
         .task(id: bundle.id) { image = await model.thumbnail(for: bundle.primary) }
@@ -755,8 +765,10 @@ struct PreviewView: View {
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             HStack(spacing: 14) {
-                Label(model.keptDriveCopy(bundle) ? "Backed up: kept the drive's better copy" : status.label, systemImage: status.color == nil ? "circle.dashed" : "circle.fill")
-                    .foregroundStyle(status.color ?? .secondary)
+                if model.showsBackup {
+                    Label(model.keptDriveCopy(bundle) ? "Backed up: kept the drive's better copy" : status.label, systemImage: status.color == nil ? "circle.dashed" : "circle.fill")
+                        .foregroundStyle(status.color ?? .secondary)
+                }
                 if let r = model.cleanup[bundle.id]?.bestReason, model.cleanup[bundle.id]?.best == true {
                     Label("Best of its similar shots: \(r)", systemImage: "star.fill").foregroundStyle(.yellow)
                 }
@@ -803,12 +815,13 @@ struct BackupSheet: View {
     let model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
+    @State private var chosen: String?          // an existing folder inside the backup folder, e.g. "2024/Bali"
+    @State private var outside = false
     @State private var existing: [String] = []
 
     var body: some View {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let problem = Naming.validateFolderName(name)
-        let label = Naming.label(forFolder: name)
+        let problem = chosen == nil ? Naming.validateFolderName(name) : nil
+        let label = Naming.label(forFolder: (trimmed as NSString).lastPathComponent)
         let first = Naming.nextNumbers(count: 1, label: label, existing: existing)[0]
         let todo = model.selectedUnbacked
         let skipped = model.selection.count - todo.count
@@ -820,9 +833,20 @@ struct BackupSheet: View {
                     .font(.callout).foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 6) {
-                Text("Folder name").font(.callout.weight(.medium))
-                TextField("e.g. 2026-10 Bali", text: $name).textFieldStyle(.roundedBorder).frame(width: 440)
-                    .onSubmit { if problem == nil && !label.isEmpty { start() } }
+                Text("Folder").font(.callout.weight(.medium))
+                // The button gets its own line: beside the 440-wide name box the sheet squeezes it to nothing.
+                if let chosen {
+                    Label("Into: \(model.driveRoot.lastPathComponent)/\(chosen)", systemImage: "folder.fill").lineLimit(1).truncationMode(.middle)
+                        .frame(width: 440, alignment: .leading)
+                    Button("New folder instead") { self.chosen = nil }
+                } else {
+                    TextField("e.g. 2026-10 Bali", text: $name).textFieldStyle(.roundedBorder).frame(width: 440)
+                        .onSubmit { if problem == nil && !label.isEmpty { start() } }
+                    Button("Choose existing folder…", action: choose)
+                }
+                if outside {
+                    Text("That folder isn't inside \(model.driveRoot.lastPathComponent). Choose one inside it, so the check can find the photos.").foregroundStyle(.red).font(.callout)
+                }
                 if label.isEmpty || trimmed.isEmpty {
                     Text("Type a name after the date, e.g. “Bali”. Starting with the date keeps folders in order.").font(.callout).foregroundStyle(.secondary)
                 } else if let problem {
@@ -849,7 +873,23 @@ struct BackupSheet: View {
         }
     }
 
-    private func start() { model.backup(folderName: name); dismiss() }
+    private func start() { model.backup(folderName: trimmed); dismiss() }
+
+    private var trimmed: String { chosen ?? name.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// The Mac's own folder window, opened in the backup folder. Only folders inside it count.
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = model.driveRoot
+        panel.prompt = "Back up here"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let inside = Naming.pathInside(model.driveRoot, folder: url)
+        outside = inside == nil
+        if let inside { chosen = inside }
+    }
 }
 
 // MARK: - Fix possible copies (settle)
@@ -860,6 +900,7 @@ struct SettleSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var leftOut: Set<String> = []
     @State private var reconciling: SettleRow?
+    @State private var lastCompared: String?   // the list comes back scrolled to this row, not to the top
     @State private var loaded = false
 
     private func action(_ r: SettleRow) -> Settle.Action? { r.action }
@@ -869,6 +910,7 @@ struct SettleSheet: View {
             if let r = reconciling {
                 ReconcileView(model: model, row: r) { same in
                     if let same { model.remember(r, same: same); leftOut.remove(r.id) }
+                    lastCompared = r.id
                     reconciling = nil
                 }
             } else { list }
@@ -893,7 +935,10 @@ struct SettleSheet: View {
             } else if rows.isEmpty {
                 ProgressView("Comparing…").frame(maxWidth: .infinity, minHeight: 200)
             } else {
-                List(rows) { r in row(r) }.frame(minWidth: 900, minHeight: 380)
+                ScrollViewReader { proxy in
+                    List(rows) { r in row(r) }.frame(minWidth: 900, minHeight: 380)
+                        .onAppear { if let id = lastCompared { proxy.scrollTo(id, anchor: .center) } }
+                }
             }
             HStack(spacing: 12) {
                 if comparing > 0 {

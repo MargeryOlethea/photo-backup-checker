@@ -58,7 +58,7 @@ enum Snapshot {
             }))
         case "do-backup": model.backup(folderName: arg)
         case "recheck": model.recheck()
-        case "do-delete":   // "green" = only backed-up selected items; "all" = with consent for the rest
+        case "do-delete":   // "green" = backed-up and clean-up items only; "all" = with consent for the rest
             let sel = model.selectedBundles
             let unbacked = model.selectedUnbacked
             model.deleteSelected(ids: Set(sel.map(\.id)), allowUnbacked: arg == "all" ? Set(unbacked.map(\.id)) : [])

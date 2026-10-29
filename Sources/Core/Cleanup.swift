@@ -9,6 +9,12 @@ public enum Cleanup {
             .values.filter { $0.count >= 2 }.map { $0.sorted() }.sorted { $0[0] < $1[0] }
     }
 
+    /// Which of `selected` must stay on the iPhone: the first member of every group that is selected in full.
+    /// Callers put the keeper first (the oldest duplicate, the ★ of similar shots), so deleting never takes a whole group.
+    public static func keepers(selected: Set<String>, groups: [[String]]) -> Set<String> {
+        Set(groups.compactMap { g in g.allSatisfy(selected.contains) ? g.first : nil })
+    }
+
     /// Similar shots: taken within `window` seconds of each other and visually close, or in the same burst.
     public static func similarGroups(items: [PhoneItem], distance: (String, String) -> Float?,
                                      threshold: Float = 0.35, window: TimeInterval = 600) -> [[String]] {

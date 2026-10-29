@@ -20,6 +20,7 @@ enum Filter: String, CaseIterable, Identifiable {
     case all = "All", backedUp = "Backed up", possible = "Possible copy", notBackedUp = "Not backed up", cleanup = "Clean-up", videos = "Videos"
     var id: String { rawValue }
     var short: String { self == .possible ? "Possible" : rawValue }
+    var needsDrive: Bool { self == .backedUp || self == .possible || self == .notBackedUp }
 }
 enum SortOrder: String, CaseIterable, Identifiable { case newest = "Newest", oldest = "Oldest", largest = "Largest"; var id: String { rawValue } }
 
@@ -80,6 +81,12 @@ final class AppModel {
     private(set) var cleanup: [String: CleanupInfo] = [:]
     private(set) var phoneState = 0          // bumped on every phone change so views refresh
     private(set) var checked = false
+    /// A check read the drive too since this iPhone was plugged in. A check without the drive only finds clean-up items.
+    private(set) var backupChecked = false
+    /// Backup colours only mean something while the drive is here and has been read.
+    var showsBackup: Bool { driveMounted && backupChecked }
+    /// Plugging the drive in after a phone-only check runs the full check.
+    private var needsCheck: Bool { !checked || (driveAvailable && !backupChecked) }
     var selection: Set<String> = []
     var selectionAnchor: String?          // last item clicked, for shift-click ranges
     private(set) var lastChecked: Date?
@@ -163,7 +170,8 @@ final class AppModel {
 
     private func refreshDrive() {
         driveMounted = FileManager.default.fileExists(atPath: driveRoot.path)
-        if driveMounted && !checked && !stoppedByUser && work == nil && phone.catalogReady && !phone.isLocked && !bundles.isEmpty { checkAll() }
+        guard driveMounted && needsCheck && !stoppedByUser && phone.catalogReady && !phone.isLocked && !bundles.isEmpty else { return }
+        if work == nil { checkAll() } else { autoCheckPending = true }
     }
 
     var hasJevKey: Bool { Jev.loadKey(from: appData) != nil }
@@ -173,8 +181,10 @@ final class AppModel {
     // MARK: what the grid shows
 
     var visible: [ItemBundle] {
+        // A backup filter left on when the drive went away shows everything.
+        let shown = showsBackup || !filter.needsDrive ? filter : .all
         let f = bundles.filter { b in
-            switch filter {
+            switch shown {
             case .all: return true
             case .backedUp: return Matcher.isDeletable(status(of: b))
             case .possible: if case .possible = status(of: b) { return true } else { return false }
@@ -238,12 +248,8 @@ final class AppModel {
         selectionAnchor = id
     }
 
-    /// A date-first folder name for the selection, e.g. "2026-10 ".
-    var suggestedFolderName: String {
-        guard let d = selectedBundles.compactMap(\.primary.captureDate).min() else { return "" }
-        let f = DateFormatter(); f.dateFormat = "yyyy-MM "
-        return f.string(from: d)
-    }
+    /// A date-first folder name for the selection: day, month or year, whichever covers all of it.
+    var suggestedFolderName: String { Naming.folderPrefix(dates: selectedBundles.compactMap(\.primary.captureDate)) }
 
     /// Every similar group at once: select all but each group's ★.
     func selectAllButBestEverywhere() { for g in similarGroups { selectAllButBest(g) } }
@@ -267,7 +273,7 @@ final class AppModel {
         phoneState += 1
         // A different iPhone: everything learned about the previous one is dropped.
         if let id = phone.deviceID, let old = deviceID, id != old {
-            cancel(); checked = false; sessionHashes = [:]; memberStatus = [:]; bundleStatus = [:]; cleanup = [:]; bundles = []; selection = []
+            cancel(); checked = false; backupChecked = false; sessionHashes = [:]; memberStatus = [:]; bundleStatus = [:]; cleanup = [:]; bundles = []; selection = []
         }
         if let id = phone.deviceID { deviceID = id }
         if phone.deviceName == nil { stoppedByUser = false }
@@ -279,7 +285,9 @@ final class AppModel {
             let oldKeys = Dictionary(bundles.flatMap(\.members).map { ($0.id, cacheKey($0)) }, uniquingKeysWith: { a, _ in a })
             for m in newBundles.flatMap(\.members) where oldKeys[m.id] != nil && oldKeys[m.id] != cacheKey(m) { memberStatus[m.id] = nil }
             // Photos taken (or changed) while plugged in haven't been checked: run the check again (cached work is instant).
-            if checked, newBundles.contains(where: { b in b.mediaMembers.contains { memberStatus[$0.id] == nil } }) { checked = false }
+            // Without the drive nothing has a status, so only tiles that weren't there before count.
+            let old = Set(bundles)
+            if checked, newBundles.contains(where: { b in backupChecked ? b.mediaMembers.contains { memberStatus[$0.id] == nil } : !old.contains(b) }) { checked = false }
             bundles = newBundles
             selection = selection.intersection(Set(bundles.map(\.id)))
             recomputeBundleStatuses()
@@ -287,7 +295,7 @@ final class AppModel {
         }
         // An open preview of something that's no longer on this phone closes.
         if case .preview(let b)? = sheet, !bundles.contains(where: { $0.id == b.id && $0 == b }) { sheet = nil }
-        if !phone.isLocked && !checked && !stoppedByUser && !bundles.isEmpty {
+        if !phone.isLocked && needsCheck && !stoppedByUser && !bundles.isEmpty {
             if work == nil { checkAll() } else { autoCheckPending = true }
         }
     }
@@ -406,7 +414,6 @@ final class AppModel {
 
     func checkAll() {
         guard work == nil else { return }
-        guard driveAvailable else { message = "Backup drive not found at \(driveRoot.path). Plug it in or choose the folder."; return }
         message = nil
         startWork { [weak self] in
             guard let self else { return }
@@ -422,28 +429,32 @@ final class AppModel {
     private func runCheck() async throws {
         let media = phone.items.filter { !$0.isSidecar }
         renders.newRun()
-
-        progress = Progress(label: "Reading backup drive", done: 0, total: 0)
+        // No drive: only look for duplicates and similar shots on the iPhone; backup colours stay as they were.
+        let withDrive = driveAvailable
         let index = driveIndex
-        _ = try await resilient(drive: true, phone: false) {
-            let files = try await index.scan { n, _ in
-                Task { @MainActor [weak self] in self?.progress = Progress(label: "Reading backup drive — \(n) files found", done: 0, total: 0) }
+        var driveFiles: [DriveFile] = []
+        if withDrive {
+            progress = Progress(label: "Reading backup drive", done: 0, total: 0)
+            _ = try await resilient(drive: true, phone: false) {
+                let files = try await index.scan { n, _ in
+                    Task { @MainActor [weak self] in self?.progress = Progress(label: "Reading backup drive — \(n) files found", done: 0, total: 0) }
+                }
+                guard self.driveAvailable else { throw BackupError.driveGone }
+                return files
             }
-            guard self.driveAvailable else { throw BackupError.driveGone }
-            return files
-        }
 
-        let phoneSizes = Set(media.map(\.size))
-        progress = Progress(label: "Fingerprinting matching files on the drive", done: 0, total: 0)
-        let driveFiles = try await resilient(drive: true, phone: false) {
-            let files = try await index.ensureHashes(forSizes: phoneSizes) { d, t in
-                Task { @MainActor [weak self] in self?.progress = Progress(label: "Fingerprinting matching files on the drive", done: d, total: t) }
+            let phoneSizes = Set(media.map(\.size))
+            progress = Progress(label: "Fingerprinting matching files on the drive", done: 0, total: 0)
+            driveFiles = try await resilient(drive: true, phone: false) {
+                let files = try await index.ensureHashes(forSizes: phoneSizes) { d, t in
+                    Task { @MainActor [weak self] in self?.progress = Progress(label: "Fingerprinting matching files on the drive", done: d, total: t) }
+                }
+                // Unplugged part-way: the unread ones are still unfingerprinted, so run it again after replug.
+                guard self.driveAvailable else { throw BackupError.driveGone }
+                return files
             }
-            // Unplugged part-way: the unread ones are still unfingerprinted, so run it again after replug.
-            guard self.driveAvailable else { throw BackupError.driveGone }
-            return files
+            saveNow()
         }
-        saveNow()
         let bySize = Dictionary(grouping: driveFiles, by: \.size)
 
         // Phone files worth fingerprinting: same size as a drive file, or as another phone file (duplicates).
@@ -482,42 +493,45 @@ final class AppModel {
             saveIfDue()
         }
 
-        // Possible copies: drive files taken at the same second.
-        let needMeta = driveFiles.filter { !$0.metadataRead }
-        for (i, f) in needMeta.enumerated() {
-            try Task.checkCancellation()
-            if i % 25 == 0 { progress = Progress(label: "Reading photo dates on the drive", done: i, total: needMeta.count) }
-            _ = try await resilient(drive: true, phone: false) {
-                let m = await index.metadata(for: f.path)
-                guard self.driveAvailable else { throw BackupError.driveGone }
-                return m
+        if withDrive {
+            // Possible copies: drive files taken at the same second.
+            let needMeta = driveFiles.filter { !$0.metadataRead }
+            for (i, f) in needMeta.enumerated() {
+                try Task.checkCancellation()
+                if i % 25 == 0 { progress = Progress(label: "Reading photo dates on the drive", done: i, total: needMeta.count) }
+                _ = try await resilient(drive: true, phone: false) {
+                    let m = await index.metadata(for: f.path)
+                    guard self.driveAvailable else { throw BackupError.driveGone }
+                    return m
+                }
+                saveIfDue()
             }
-            saveIfDue()
-        }
-        let all = await driveIndex.allFiles()
-        var byTime: [Int: [DriveFile]] = [:]
-        for f in all { if let d = f.captureDate { byTime[Int(d.timeIntervalSince1970), default: []].append(f) } }
+            let all = await driveIndex.allFiles()
+            var byTime: [Int: [DriveFile]] = [:]
+            for f in all { if let d = f.captureDate { byTime[Int(d.timeIntervalSince1970), default: []].append(f) } }
 
-        // Kept drive copies count only while their bytes are unchanged: re-fingerprint each.
-        // ponytail: full re-read every check; skip when size+mtime match the kept file if kept videos make checks slow.
-        let sizes = Dictionary(all.map { ($0.path, $0.size) }, uniquingKeysWith: { a, _ in a })
-        var keptNow: [String: String] = [:]   // drive path → fingerprint now
-        for item in media {
-            guard let d = decisions[deviceKey(item)], d.kind == .keepDrive, keptNow[d.drivePath] == nil, sizes[d.drivePath] == d.driveSize else { continue }
+            // Kept drive copies count only while their bytes are unchanged: re-fingerprint each.
+            // ponytail: full re-read every check; skip when size+mtime match the kept file if kept videos make checks slow.
+            let sizes = Dictionary(all.map { ($0.path, $0.size) }, uniquingKeysWith: { a, _ in a })
+            var keptNow: [String: String] = [:]   // drive path → fingerprint now
+            for item in media {
+                guard let d = decisions[deviceKey(item)], d.kind == .keepDrive, keptNow[d.drivePath] == nil, sizes[d.drivePath] == d.driveSize else { continue }
+                try Task.checkCancellation()
+                let url = URL(fileURLWithPath: d.drivePath)
+                keptNow[d.drivePath] = await Task.detached { try? Fingerprint.sha256(fileAt: url) }.value
+            }
+
             try Task.checkCancellation()
-            let url = URL(fileURLWithPath: d.drivePath)
-            keptNow[d.drivePath] = await Task.detached { try? Fingerprint.sha256(fileAt: url) }.value
+            for item in media {
+                let t = item.captureDate.map { Int($0.timeIntervalSince1970) }
+                let candidates = t.map { (($0 - 1)...($0 + 1)).flatMap { byTime[$0] ?? [] } } ?? []
+                let found = Matcher.status(item: item, phoneHash: knownHash(item), sameSize: bySize[item.size] ?? [], candidates: candidates)
+                let d = decisions[deviceKey(item)]
+                memberStatus[item.id] = Settle.applying(d, to: found, driveSHA256: d.flatMap { keptNow[$0.drivePath] })
+            }
+            recomputeBundleStatuses()
+            backupChecked = true
         }
-
-        try Task.checkCancellation()
-        for item in media {
-            let t = item.captureDate.map { Int($0.timeIntervalSince1970) }
-            let candidates = t.map { (($0 - 1)...($0 + 1)).flatMap { byTime[$0] ?? [] } } ?? []
-            let found = Matcher.status(item: item, phoneHash: knownHash(item), sameSize: bySize[item.size] ?? [], candidates: candidates)
-            let d = decisions[deviceKey(item)]
-            memberStatus[item.id] = Settle.applying(d, to: found, driveSHA256: d.flatMap { keptNow[$0.drivePath] })
-        }
-        recomputeBundleStatuses()
 
         // Clean-up: exact duplicates and similar shots.
         var primaryHashes: [String: String] = [:]
@@ -796,21 +810,25 @@ final class AppModel {
 
     // MARK: backup
 
+    /// `folderName` is a new folder's name, or a folder already inside the backup folder ("2024/Bali").
+    /// Files are named after its last part.
     func backup(folderName: String) {
+        let parts = folderName.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "/").map(String.init)
+        guard let last = parts.last, parts.allSatisfy({ Naming.validateFolderName($0) == nil }) else { message = "That folder name can't be used."; return }
         guard work == nil else { message = "Something else is running. Wait for it to finish (or press Stop), then back up again."; return }
         guard driveAvailable else { message = "Backup drive not found. Plug it in first."; return }
         // Green items already have their exact copy on the drive: copying them again would only make duplicates.
         let chosen = selectedUnbacked
         let skipped = selectedBundles.count - chosen.count
         guard !chosen.isEmpty else { message = "Everything selected is already backed up; nothing was copied."; return }
-        let folder = driveRoot.appendingPathComponent(folderName.trimmingCharacters(in: .whitespacesAndNewlines))
+        let folder = parts.reduce(driveRoot) { $0.appendingPathComponent($1) }
         startWork { [weak self] in
             guard let self else { return }
             var entries: [ReceiptEntry] = []
             var leftOut = 0
             do {
                 let existing = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
-                let plan = try BackupWriter.plan(bundles: chosen, folderName: folderName, existingNames: existing)
+                let plan = try BackupWriter.plan(bundles: chosen, folderName: last, existingNames: existing)
                 try BackupWriter.preflight(folder: folder, totalBytes: plan.reduce(0) { $0 + $1.item.size }, largestFile: plan.map(\.item.size).max() ?? 0)
                 for (i, p) in plan.enumerated() {
                     try Task.checkCancellation()
@@ -1081,7 +1099,42 @@ final class AppModel {
     // MARK: delete
 
     /// Selected items with no exact copy on the drive: deleting them loses them for good, and only these get backed up.
+    /// Duplicates and similar shots: one copy (or the ★) always stays on the iPhone, so they delete with a plain confirm.
+    func isCleanupDelete(_ b: ItemBundle) -> Bool { cleanup[b.id].map { $0.duplicate || $0.similarGroup != nil } ?? false }
+    var selectedCleanup: [ItemBundle] { selectedBundles.filter { !Matcher.isDeletable(status(of: $0)) && isCleanupDelete($0) } }
     var selectedUnbacked: [ItemBundle] { selectedBundles.filter { !Matcher.isDeletable(status(of: $0)) } }
+    /// What the delete sheet asks "I understand" for: not backed up and not a clean-up item.
+    var selectedNeedsConsent: [ItemBundle] { selectedUnbacked.filter { !isCleanupDelete($0) } }
+
+    /// Duplicate sets (oldest first) and similar groups (★ first): the first of each stays when all of it is chosen.
+    private var cleanupGroups: [[String]] {
+        let dups = Dictionary(grouping: bundles.filter { cleanup[$0.id]?.duplicate == true && knownHash($0.primary) != nil }) { knownHash($0.primary)! }
+            .values.map { $0.sorted { ($0.primary.captureDate ?? .distantFuture) < ($1.primary.captureDate ?? .distantFuture) }.map(\.id) }
+        let similar = similarGroups.map { $0.sorted { cleanup[$0.id]?.best == true && cleanup[$1.id]?.best != true }.map(\.id) }
+        return dups + similar
+    }
+
+    /// Why a duplicate must stay, or nil: it goes only while a twin that isn't leaving is still on the iPhone
+    /// and every part of both reads the same, from the phone in this session.
+    private func duplicateGate(_ b: ItemBundle, leaving: Set<String>) async -> String? {
+        guard cleanup[b.id]?.duplicate == true else { return nil }
+        guard let h = knownHash(b.primary) else { return "\(b.primary.name): its copy couldn't be confirmed" }
+        let onPhone = Set(phone.items.map(\.id))
+        do {
+            let mine = try await freshHashes(b)
+            for t in bundles where t.id != b.id && !leaving.contains(t.id) && knownHash(t.primary) == h && t.members.allSatisfy({ onPhone.contains($0.id) }) {
+                if try await freshHashes(t) == mine { return nil }
+            }
+        } catch { return "\(b.primary.name): couldn't read it from the iPhone (\(Self.describe(error)))" }
+        return "\(b.primary.name): no matching copy stays on the iPhone"
+    }
+
+    private func freshHashes(_ b: ItemBundle) async throws -> [String] {
+        var out: [String] = []
+        // Every member, edit sidecars too: the delete takes them all.
+        for m in b.members { out.append(try await resilient(drive: false, phone: true) { try await self.hash(m, fresh: true) }) }
+        return out.sorted()
+    }
 
     /// Green items are checked against the drive again, one at a time, right before each delete.
     /// Items that aren't green are deleted only with `includeUnbacked`, which the person ticks knowingly.
@@ -1092,17 +1145,22 @@ final class AppModel {
         guard phone.canDelete, !ids.isEmpty else { return }
         let chosenNow = bundles.filter { ids.contains($0.id) }
         let green = chosenNow.filter { Matcher.isDeletable(status(of: $0)) }
-        let others = chosenNow.filter { !Matcher.isDeletable(status(of: $0)) && allowUnbacked.contains($0.id) }
+        let keep = Cleanup.keepers(selected: ids, groups: cleanupGroups)
+        let tidy = chosenNow.filter { !Matcher.isDeletable(status(of: $0)) && isCleanupDelete($0) && !keep.contains($0.id) }
+        let keptCopies = chosenNow.filter { !Matcher.isDeletable(status(of: $0)) && isCleanupDelete($0) && keep.contains($0.id) }.count
+        let others = chosenNow.filter { !Matcher.isDeletable(status(of: $0)) && !isCleanupDelete($0) && allowUnbacked.contains($0.id) }
+        let leaving = Set((green + tidy + others).map(\.id))
         guard green.isEmpty || driveAvailable else { message = "Backup drive not found. Plug it in first, or unselect the green items."; return }
         startWork { [weak self] in
             guard let self else { return }
-            var deleted = 0, deletedUnbacked = 0, refused = 0
+            var deleted = 0, deletedUnbacked = 0, deletedTidy = 0, refused = 0
             var kept: [String] = []
             let chosen = green
             let macDeletes = chosen.filter { !$0.onlyPhoneCanDelete }
             let handover = chosen.filter(\.onlyPhoneCanDelete)
             let macOthers = others.filter { !$0.onlyPhoneCanDelete }
-            let handoverOthers = others.filter(\.onlyPhoneCanDelete)
+            var handoverOthers = others.filter(\.onlyPhoneCanDelete)
+            let macTidy = tidy.filter { !$0.onlyPhoneCanDelete }
             var receiptEntries: [URL: [ReceiptEntry]] = [:]
             var skipped = Set<String>()
             var macDeletedIDs = Set<String>()
@@ -1177,6 +1235,23 @@ final class AppModel {
                     case .kept(let why): kept.append(why)
                     }
                 }
+                for (i, b) in macTidy.enumerated() {
+                    try Task.checkCancellation()
+                    self.progress = Progress(label: "Deleting duplicates and similar shots", done: i, total: macTidy.count)
+                    switch try await self.deleteFromPhone(b, gate: { await self.duplicateGate(b, leaving: leaving) }) {
+                    case .deleted:
+                        deletedTidy += 1
+                        macDeletedIDs.insert(b.id)
+                        self.logDeleted(b, backedUpAt: nil)
+                    case .refused: refused += 1
+                    case .kept(let why): kept.append(why)
+                    }
+                }
+                // The Shortcut deletes later, so each duplicate is confirmed before it goes on the list.
+                for b in tidy where b.onlyPhoneCanDelete {
+                    try Task.checkCancellation()
+                    if let why = await self.duplicateGate(b, leaving: leaving) { kept.append(why) } else { handoverOthers.append(b) }
+                }
                 let handedOver = PhoneDelete.handoverList(
                     (handover + handoverOthers).filter { !skipped.contains($0.id) }, allPhoneItems: self.phone.items)
                 if !handedOver.names.isEmpty {
@@ -1206,9 +1281,10 @@ final class AppModel {
                 catch { receiptFailed = true }
             }
             var lines: [String] = []
-            if deleted + deletedUnbacked > 0 {
-                lines.append("Deleted \(deleted + deletedUnbacked) item(s) from your iPhone" + (deletedUnbacked > 0 ? " (\(deletedUnbacked) weren't backed up)." : "."))
+            if deleted + deletedUnbacked + deletedTidy > 0 {
+                lines.append("Deleted \(deleted + deletedUnbacked + deletedTidy) item(s) from your iPhone" + (deletedUnbacked > 0 ? " (\(deletedUnbacked) weren't backed up)." : "."))
             }
+            if keptCopies > 0 { lines.append("Kept \(keptCopies) on the iPhone so one of each photo stays.") }
             if !handoverNames.isEmpty {
                 lines.append("\(handoverNames.count) camera photo(s) are on your clipboard: on the iPhone, run the “Delete listed photos” Shortcut.")
             }
