@@ -403,7 +403,7 @@ struct DeleteSheet: View {
                 .padding(12)
                 .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: Radius.card))
             }
-            Text("Mac deletes leave the iPhone right away and may not go to Recently Deleted; the Shortcut puts photos in Recently Deleted for 30 days. A list of everything deleted or handed over is kept on this Mac.")
+            Text("Mac deletes leave the iPhone right away and may not go to Recently Deleted; the Shortcut puts them in Recently Deleted for 30 days. A list of everything deleted or handed over is kept on this Mac.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 if model.busy { Label("Waiting for the current task to finish…", systemImage: "hourglass").font(.callout).foregroundStyle(.secondary) }
@@ -537,7 +537,7 @@ struct FooterView: View {
             Spacer()
             if let t = model.lastChecked { Text("Checked \(t.formatted(date: .omitted, time: .shortened))").foregroundStyle(.secondary) }
             Image(systemName: "icloud.slash").foregroundStyle(.secondary)
-                .help("Photos stored only in iCloud (Optimize iPhone Storage) aren't on the phone, so they aren't listed or checked.")
+                .help("Photos and videos stored only in iCloud (Optimize iPhone Storage) aren't on the phone, so they aren't listed or checked.")
             Button { model.recheck() } label: { Label("Check again", systemImage: "arrow.clockwise") }
                 .buttonStyle(.borderless)
                 .disabled(model.busy || model.phone.deviceName == nil)
@@ -551,7 +551,7 @@ struct FooterView: View {
     private func chooseDrive() {
         let p = NSOpenPanel()
         p.canChooseDirectories = true; p.canChooseFiles = false; p.prompt = "Use this folder"
-        p.message = "Choose the folder on your drive where your photos are backed up."
+        p.message = "Choose the folder on your drive where your photos and videos are backed up."
         if p.runModal() == .OK, let url = p.url { model.driveRoot = url; model.recheck() }
     }
 }
@@ -580,7 +580,7 @@ struct CleanupView: View {
                     ForEach(groups, id: \.first!.id) { g in groupBox(g) }
                 }
                 if !dups.isEmpty {
-                    sectionTitle("Exact duplicates", "The same photo saved more than once.")
+                    sectionTitle("Exact duplicates", "The same photo or video saved more than once.")
                     tiles(dups)
                 }
                 if !junk.isEmpty {
@@ -845,7 +845,7 @@ struct BackupSheet: View {
                     Button("Choose existing folder…", action: choose)
                 }
                 if outside {
-                    Text("That folder isn't inside \(model.driveRoot.lastPathComponent). Choose one inside it, so the check can find the photos.").foregroundStyle(.red).font(.callout)
+                    Text("That folder isn't inside \(model.driveRoot.lastPathComponent). Choose one inside it, so the check can find them.").foregroundStyle(.red).font(.callout)
                 }
                 if label.isEmpty || trimmed.isEmpty {
                     Text("Type a name after the date, e.g. “Bali”. Starting with the date keeps folders in order.").font(.callout).foregroundStyle(.secondary)
@@ -927,7 +927,7 @@ struct SettleSheet: View {
         let unsure = rows.filter { $0.verdict != nil && action($0) == nil }.count
         return VStack(alignment: .leading, spacing: 12) {
             Text("Fix possible copies").font(.title3.weight(.semibold))
-            Text("The drive has a file that looks like each of these iPhone photos but isn't identical. Where the iPhone's is better, it replaces the drive copy (the old one goes to the drive's Trash). Where the drive's is better, that copy is kept and the item turns green. Where the app isn't sure, press “Compare” and decide yourself.")
+            Text("The drive has a file that looks like each of these iPhone photos and videos but isn't identical. Where the iPhone's is better, it replaces the drive copy (the old one goes to the drive's Trash). Where the drive's is better, that copy is kept and the item turns green. Where the app isn't sure, press “Compare” and decide yourself.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if rows.isEmpty && loaded {
                 Label("Nothing to fix: no possible copies that can be fixed right now.", systemImage: "checkmark.circle")

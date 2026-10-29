@@ -105,6 +105,7 @@ public struct ItemBundle: Identifiable, Hashable, Sendable {
     public var mediaMembers: [PhoneItem] { members.filter { !$0.isSidecar } }
     /// What can be read from the iPhone: everything but a burst shot's edited version (see `Bundler`).
     public var readableMembers: [PhoneItem] { members.filter { !($0.isSidecar && $0.isEditedRender) } }
-    /// The iPhone refuses to delete photos with an edited version from a Mac (answers "deleted", keeps them).
-    public var onlyPhoneCanDelete: Bool { members.contains(where: \.isEditedRender) }
+    /// The iPhone refuses to delete photos with an edited version from a Mac (answers "deleted", keeps them),
+    /// and deleting videos from the Mac fails too: both go to the iPhone Shortcut.
+    public var onlyPhoneCanDelete: Bool { primary.isVideo || members.contains(where: \.isEditedRender) }
 }

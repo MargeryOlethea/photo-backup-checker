@@ -66,7 +66,7 @@ enum Pause: Equatable {
         case .phoneUnplugged: "iPhone unplugged. Plug it back in to continue. Nothing was lost."
         case .phoneLocked: "iPhone is locked. Unlock it to continue."
         case .phoneNotResponding: "iPhone stopped responding. Unlock it and keep the screen on; the app keeps retrying."
-        case .phoneLoading: "Reading the list of photos on the iPhone…"
+        case .phoneLoading: "Reading the list of photos and videos on the iPhone…"
         case .phoneStuck: "iPhone stopped answering. Unplug it and plug it back in; work continues by itself. Nothing was lost."
         }
     }
@@ -481,7 +481,7 @@ final class AppModel {
         }
         for (i, item) in toHash.enumerated() {
             try Task.checkCancellation()
-            progress = Progress(label: "Checking photos on iPhone", done: i, total: toHash.count)
+            progress = Progress(label: "Checking photos and videos on iPhone", done: i, total: toHash.count)
             // Already fingerprinted ones are still "read" here: that's instant and costs nothing.
             if try await !read(item, timeout: 30) { slow.append(item) }
             saveIfDue()
@@ -498,7 +498,7 @@ final class AppModel {
             let needMeta = driveFiles.filter { !$0.metadataRead }
             for (i, f) in needMeta.enumerated() {
                 try Task.checkCancellation()
-                if i % 25 == 0 { progress = Progress(label: "Reading photo dates on the drive", done: i, total: needMeta.count) }
+                if i % 25 == 0 { progress = Progress(label: "Reading dates on the drive", done: i, total: needMeta.count) }
                 _ = try await resilient(drive: true, phone: false) {
                     let m = await index.metadata(for: f.path)
                     guard self.driveAvailable else { throw BackupError.driveGone }
@@ -1042,7 +1042,7 @@ final class AppModel {
                 }
                 var parts: [String] = []
                 if keptDrive > 0 { parts.append("kept the drive's better copy for \(keptDrive) item\(keptDrive == 1 ? "" : "s")") }
-                if different > 0 { parts.append("\(different) marked as a different photo; back \(different == 1 ? "it" : "them") up as usual") }
+                if different > 0 { parts.append("\(different) marked as not the same; back \(different == 1 ? "it" : "them") up as usual") }
                 if replaced > 0 { parts.append("replaced \(replaced) drive cop\(replaced == 1 ? "y" : "ies") with the iPhone original" + (replaced > keptBoth ? " (old ones are in the drive's Trash)" : "")) }
                 if added > 0 { parts.append("added \(added) iPhone original\(added == 1 ? "" : "s") next to the drive copy") }
                 if keptBoth > 0 { parts.append("\(keptBoth) old cop\(keptBoth == 1 ? "y" : "ies") couldn't go to the Trash, so both were kept") }
@@ -1170,7 +1170,7 @@ final class AppModel {
                 let media = chosen.flatMap(\.mediaMembers)
                 for (i, m) in media.enumerated() where self.sessionHashes[self.cacheKey(m)] == nil && self.keptDrive(m) == nil {
                     try Task.checkCancellation()
-                    self.progress = Progress(label: "Re-checking photos on iPhone before deleting", done: i, total: media.count)
+                    self.progress = Progress(label: "Re-checking photos and videos on iPhone before deleting", done: i, total: media.count)
                     _ = try await self.resilient(drive: false, phone: true) { try await self.hash(m, fresh: true) }
                 }
                 // An edited version can stand in for its original only long enough to make a safe, separate copy.
@@ -1284,12 +1284,12 @@ final class AppModel {
             if deleted + deletedUnbacked + deletedTidy > 0 {
                 lines.append("Deleted \(deleted + deletedUnbacked + deletedTidy) item(s) from your iPhone" + (deletedUnbacked > 0 ? " (\(deletedUnbacked) weren't backed up)." : "."))
             }
-            if keptCopies > 0 { lines.append("Kept \(keptCopies) on the iPhone so one of each photo stays.") }
+            if keptCopies > 0 { lines.append("Kept \(keptCopies) on the iPhone so one of each stays.") }
             if !handoverNames.isEmpty {
-                lines.append("\(handoverNames.count) camera photo(s) are on your clipboard: on the iPhone, run the “Delete listed photos” Shortcut.")
+                lines.append("\(handoverNames.count) item(s) are on your clipboard: on the iPhone, run the “Delete listed photos” Shortcut.")
             }
             if !notUnique.isEmpty {
-                lines.append("\(notUnique.count) share a name with another photo on the iPhone and must be deleted by hand in Photos: \(notUnique.prefix(3).map { $0.primary.name }.joined(separator: ", "))")
+                lines.append("\(notUnique.count) share a name with another item on the iPhone and must be deleted by hand in Photos: \(notUnique.prefix(3).map { $0.primary.name }.joined(separator: ", "))")
             }
             if refused > 0 { lines.append("iPhone didn't delete \(refused).") }
             if !kept.isEmpty { lines.append("Kept some: " + kept.prefix(3).joined(separator: "; ")) }
@@ -1432,7 +1432,7 @@ final class AppModel {
         case Settle.SettleError.driveFileChanged: return "The drive's file changed since it was compared, so it was left alone."
         case BackupError.io(let code): return "The drive reported a problem: \(String(cString: strerror(code)))."
         case is PhoneGone: return "The iPhone was disconnected."
-        case is NotOnPhone: return "A photo is no longer on the iPhone."
+        case is NotOnPhone: return "An item is no longer on the iPhone."
         case is ShortRead: return "The iPhone sent incomplete data."
         case is TimedOut: return "The iPhone stopped responding. Unlock it and try again."
         default: return e.localizedDescription

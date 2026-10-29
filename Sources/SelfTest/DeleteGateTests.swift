@@ -59,6 +59,8 @@ func deleteGateTests() async {
     let pngBundle = ItemBundle(id: png.id, primary: png, members: [png], kind: .single)
     check(cameraBundle.onlyPhoneCanDelete, "edited-version bundle can only be deleted by the iPhone")
     check(!pngBundle.onlyPhoneCanDelete, "single PNG can be deleted from the Mac")
+    let mov = PhoneItem(id: "DCIM/100APPLE/IMG_3001.MOV", name: "IMG_3001.MOV", size: 1, uti: "com.apple.quicktime-movie")
+    check(ItemBundle(id: mov.id, primary: mov, members: [mov], kind: .single).onlyPhoneCanDelete, "a video goes to the iPhone Shortcut")
 
     let other = PhoneItem(id: "DCIM/100APPLE/IMG_3000.HEIC", name: "IMG_3000.HEIC", size: 1, uti: "public.heic")
     let otherBundle = ItemBundle(id: other.id, primary: other, members: [other], kind: .single)
