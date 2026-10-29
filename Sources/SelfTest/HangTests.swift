@@ -20,17 +20,15 @@ func hangTests() {
     h.answered()
     check(!h.timedOut(p("IMG_0003.HEIC")), "an answer in between starts the count again")
 
-    // Edited versions the iPhone can't make: one try per check, given up on after 3 failed checks.
+    // Edited versions the iPhone can't make: one failed try and it is given up on for good (every try costs a replug).
     var t = RenderTries()
     check(t.shouldTry("e"), "an untried edited version is tried")
     t.failed("e")
-    check(!t.shouldTry("e") && t.tried("e") && !t.gaveUp("e"), "after a failed try it waits for the next check")
+    check(!t.shouldTry("e") && t.tried("e") && t.gaveUp("e"), "given up after one failed try")
     t.failed("e")
     check(t.counts["e"] == 1, "a second failure in the same check doesn't count twice")
     t.newRun()
-    check(t.shouldTry("e"), "the next check tries it again")
-    t.failed("e"); t.newRun(); t.failed("e"); t.newRun()
-    check(!t.shouldTry("e") && t.gaveUp("e") && t.counts["e"] == 3, "given up after 3 failed checks")
+    check(!t.shouldTry("e"), "the next check doesn't try it again")
     check(t.shouldTry("other"), "other edited versions are unaffected")
 
     // Saved counts; the old file only stored when each one hung (a date), which stands for one try.
@@ -38,7 +36,7 @@ func hangTests() {
     check(RenderTries.load(from: url).counts == [:], "missing file: no tries")
     try! Data(#"{"a|1|2":814894418.959036,"b|1|2":814895138.9}"#.utf8).write(to: url)
     check(RenderTries.load(from: url).counts == ["a|1|2": 1, "b|1|2": 1], "old date entries count as one try")
-    try! JSONStore.save(["a|1|2": 3, "c": 2], to: url)
-    check(RenderTries.load(from: url).counts == ["a|1|2": 3, "c": 2], "counts are read back")
-    check(RenderTries.max == 3, "an edited version is given up on after 3 tries")
+    try! JSONStore.save(["a|1|2": 3, "c": 1], to: url)
+    check(RenderTries.load(from: url).counts == ["a|1|2": 1, "c": 1], "counts are read back; old higher counts still mean given up")
+    check(RenderTries.max == 1, "an edited version is given up on after one try")
 }

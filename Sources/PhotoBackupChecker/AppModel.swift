@@ -58,7 +58,7 @@ struct Progress: Equatable { var label: String; var done: Int; var total: Int }
 
 /// Why running work is waiting. It continues by itself once the cause is gone.
 enum Pause: Equatable {
-    case driveUnplugged, phoneUnplugged, phoneLocked, phoneNotResponding, phoneLoading, phoneReconnecting, phoneStuck
+    case driveUnplugged, phoneUnplugged, phoneLocked, phoneNotResponding, phoneLoading, phoneStuck
     var text: String {
         switch self {
         case .driveUnplugged: "Hard disk unplugged. Plug it back in to continue. Nothing was lost."
@@ -66,8 +66,7 @@ enum Pause: Equatable {
         case .phoneLocked: "iPhone is locked. Unlock it to continue."
         case .phoneNotResponding: "iPhone stopped responding. Unlock it and keep the screen on; the app keeps retrying."
         case .phoneLoading: "Reading the list of photos on the iPhone…"
-        case .phoneReconnecting: "iPhone stopped answering. Reconnecting by itself (about half a minute)… Nothing was lost."
-        case .phoneStuck: "iPhone stopped answering and reconnecting didn't help. Unplug it and plug it back in; work continues by itself. Nothing was lost."
+        case .phoneStuck: "iPhone stopped answering. Unplug it and plug it back in; work continues by itself. Nothing was lost."
         }
     }
 }
@@ -120,7 +119,7 @@ final class AppModel {
     private var autoCheckPending = false
     /// The person pressed Stop: no check starts by itself until "Check again" or a replug.
     private var stoppedByUser = false
-    /// Edited versions (device-scoped keys) the iPhone failed to make: one try per check, given up after 3 checks.
+    /// Edited versions (device-scoped keys) the iPhone failed to make: given up on after one failed try.
     private var renders = RenderTries()
     private var deviceID: String?
     private var lastSave = Date()
@@ -372,29 +371,18 @@ final class AppModel {
         }
     }
 
-    /// The connection is jammed: a request hung and everything after it would too. First reopens the session by
-    /// itself (a software replug, usually about 30 s). If the phone hasn't listed its photos again within 90 s,
-    /// asks for a real replug and waits for it; the next step then runs on the fresh connection.
+    /// The connection is jammed: a request hung and everything after it would too. Asks for a replug straight away
+    /// and waits for the phone to list its photos again; the next step then runs on the fresh connection.
+    /// The session is also reopened in software meanwhile, in case the phone answers that first.
+    /// ponytail: the software reopen has never once worked on the owner's iPhone, so nobody waits for it any more.
     private func waitForReplug() async throws {
-        let start = Date()
         saveNow()
         guard phone.deviceName != nil else { phone.reconnect(); return }   // unplugged: clears the jam; the next step waits for the replug
-        Diag.log("phone jammed — reconnecting")
-        pause = .phoneReconnecting
+        Diag.log("phone jammed — asking for a replug")
         phone.reconnect()
-        var deadline = start.addingTimeInterval(90)
-        while phone.deviceName != nil && !phone.catalogReady && Date() < deadline {
-            // A locked phone can't list its photos: say so, and don't count that time against the reconnect.
-            if phone.isLocked { pause = .phoneLocked; deadline = Date().addingTimeInterval(90) } else { pause = .phoneReconnecting }
-            try await Task.sleep(nanoseconds: 1_000_000_000)
-        }
-        if phone.deviceName != nil && phone.catalogReady {
-            Diag.log("reconnected in \(Int(Date().timeIntervalSince(start))) s")
-            return
-        }
-        Diag.log("reconnecting didn't work — asking for a replug")
-        pause = .phoneStuck
         while phone.deviceName != nil && !phone.catalogReady {
+            // A locked phone can't list its photos: say so instead.
+            pause = phone.isLocked ? .phoneLocked : .phoneStuck
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
     }
@@ -535,13 +523,10 @@ final class AppModel {
         try await findSimilar(into: &info)
         try Task.checkCancellation()
         cleanup = info
-        let failedRenders = media.filter { renders.tried(deviceKey($0)) && knownHash($0) == nil }
-        let gaveUp = failedRenders.filter { renders.gaveUp(deviceKey($0)) }.count
-        let tryAgain = failedRenders.count - gaveUp
+        let gaveUp = media.filter { renders.gaveUp(deviceKey($0)) && knownHash($0) == nil }.count
         let notes = [
             unreadable > 0 ? "\(unreadable) file(s) couldn't be read from the iPhone; they stay unmarked." : nil,
-            tryAgain > 0 ? "\(tryAgain) edited version(s) the iPhone couldn't make this time; they stay unmarked and are tried again next time." : nil,
-            gaveUp > 0 ? "\(gaveUp) edited version(s) the iPhone can't make (tried \(RenderTries.max) times); they stay unmarked." : nil,
+            gaveUp > 0 ? "\(gaveUp) edited version(s) the iPhone can't make; they stay unmarked." : nil,
         ].compactMap { $0 }
         message = notes.isEmpty ? nil : notes.joined(separator: " ")
     }

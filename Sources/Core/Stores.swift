@@ -15,10 +15,10 @@ public enum JSONStore {
 }
 
 /// Edited versions the iPhone failed to make, by device-scoped key. Every try jams the connection and costs a
-/// reconnect, so each gets one try per check and is given up on for good after `max` failed checks.
+/// replug, so each is given up on for good after `max` failed tries (one try per check).
 /// `counts` is what is saved; the file used to hold the date of the single try instead of a count.
 public struct RenderTries {
-    public static let max = 3
+    public static let max = 1
     public private(set) var counts: [String: Int]
     private var triedThisRun: Set<String> = []
     public init(counts: [String: Int] = [:]) { self.counts = counts }
