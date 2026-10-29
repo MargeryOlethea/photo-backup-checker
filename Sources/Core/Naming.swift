@@ -24,6 +24,12 @@ public enum Naming {
         return ext.isEmpty ? base : "\(base).\(ext)"
     }
 
+    public static func originalName(besideEditedCopy drivePath: String, ext: String) -> String {
+        let name = (drivePath as NSString).lastPathComponent
+        let base = (name as NSString).deletingPathExtension
+        return ext.isEmpty ? "\(base) original" : "\(base) original.\(ext)"
+    }
+
     public static func existingNumbers(label: String, in names: [String]) -> Set<Int> {
         let pattern = "^" + NSRegularExpression.escapedPattern(for: label) + #" (\d+)( edited)?(\.[^.]+)?$"#
         guard let re = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return [] }

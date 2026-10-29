@@ -361,6 +361,13 @@ struct DeleteSheet: View {
     var body: some View {
         let green = all.filter { !unbacked.contains($0) }
         let possible = unbacked.filter { if case .possible = model.status(of: $0) { true } else { false } }.count
+        let macCount = all.filter { !$0.onlyPhoneCanDelete }.count
+        let phoneCount = all.count - macCount
+        let deleteParts = [
+            macCount > 0 ? "Delete \(macCount)" : nil,
+            phoneCount > 0 ? "\(macCount > 0 ? "hand" : "Hand") \(phoneCount) to iPhone" : nil
+        ].compactMap { $0 }
+        let deleteTitle = deleteParts.joined(separator: " · ") + (unbacked.isEmpty ? "" : " forever")
         VStack(alignment: .leading, spacing: 14) {
             Label("Delete \(all.count) item\(all.count == 1 ? "" : "s") (\(gb(all.reduce(0) { $0 + $1.totalSize }))) from your iPhone?", systemImage: "trash")
                 .font(.title3.weight(.semibold))
@@ -369,7 +376,7 @@ struct DeleteSheet: View {
                     Label("\(green.count) backed up. Each is checked against its drive copy (by fingerprint) right before it's deleted. If a check fails, that item is kept.",
                           systemImage: "checkmark.circle.fill")
                         .foregroundStyle(.green).fixedSize(horizontal: false, vertical: true)
-                    strip(green)
+                    rows(green)
                 }
             }
             if !unbacked.isEmpty {
@@ -380,13 +387,13 @@ struct DeleteSheet: View {
                         Text("\(possible) of these \(possible == 1 ? "has" : "have") a similar file on the drive that isn't identical. Consider “Review possible copies” first.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
-                    strip(unbacked)
+                    rows(unbacked)
                     Toggle("I understand these are not backed up and can't be recovered", isOn: $understood)
                 }
                 .padding(12)
                 .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: Radius.card))
             }
-            Text("Deleted items leave the iPhone right away and may not go to its Recently Deleted album. A list of everything deleted is kept on this Mac.")
+            Text("Mac deletes leave the iPhone right away and may not go to Recently Deleted; the Shortcut puts photos in Recently Deleted for 30 days. A list of everything deleted or handed over is kept on this Mac.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 if model.busy { Label("Waiting for the current task to finish…", systemImage: "hourglass").font(.callout).foregroundStyle(.secondary) }
@@ -397,7 +404,7 @@ struct DeleteSheet: View {
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(unbacked.isEmpty ? "Delete \(all.count)" : "Delete \(all.count) forever", role: .destructive) {
+                Button(deleteTitle, role: .destructive) {
                     model.deleteSelected(ids: Set(all.map(\.id)), allowUnbacked: understood ? Set(unbacked.map(\.id)) : []); dismiss()
                 }
                 .buttonStyle(.borderedProminent).tint(.red)
@@ -407,6 +414,21 @@ struct DeleteSheet: View {
         .padding(22)
         .frame(width: 600)
         .onAppear { all = model.selectedBundles; unbacked = model.selectedUnbacked }
+    }
+
+    @ViewBuilder private func rows(_ list: [ItemBundle]) -> some View {
+        let mac = list.filter { !$0.onlyPhoneCanDelete }
+        let phone = list.filter(\.onlyPhoneCanDelete)
+        if !mac.isEmpty {
+            Label("Deleted now by the Mac: \(mac.count)", systemImage: "laptopcomputer")
+                .font(.callout).fixedSize(horizontal: false, vertical: true)
+            strip(mac)
+        }
+        if !phone.isEmpty {
+            Label("Handed to the iPhone Shortcut: \(phone.count). Their names go to your clipboard; run “Delete listed photos” on the iPhone afterwards.", systemImage: "iphone")
+                .font(.callout).fixedSize(horizontal: false, vertical: true)
+            strip(phone)
+        }
     }
 
     private func strip(_ list: [ItemBundle]) -> some View {
@@ -629,6 +651,7 @@ struct TileView: View {
                     pill(bundle.primary.formatLabel)
                     if bundle.kind == .live { pill("Live") }
                     if bundle.kind == .burst { pill("Burst \(bundle.mediaMembers.count)") }
+                    if !bundle.onlyPhoneCanDelete { pill("Mac deletes") }
                 }
                 if info?.duplicate == true { pill("Duplicate") }
                 if info?.similarGroup != nil && info?.best != true { pill("Similar") }
@@ -670,7 +693,8 @@ struct TileView: View {
         .scaleEffect(hover ? 1.02 : 1)
         .animation(.easeOut(duration: 0.12), value: hover)
         .onHover { hover = $0 }
-        .help([bundle.primary.name, bundle.primary.captureDate?.formatted(date: .abbreviated, time: .shortened), gb(bundle.totalSize), status.label]
+        .help([bundle.primary.name, bundle.primary.captureDate?.formatted(date: .abbreviated, time: .shortened), gb(bundle.totalSize), status.label,
+               bundle.onlyPhoneCanDelete ? "Deleted via the iPhone Shortcut" : "Deleted by the Mac"]
             .compactMap { $0 }.joined(separator: " · "))
         .task(id: bundle.id) { image = await model.thumbnail(for: bundle.primary) }
     }

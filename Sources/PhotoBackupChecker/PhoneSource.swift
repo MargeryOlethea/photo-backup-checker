@@ -187,9 +187,14 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
         nonisolated(unsafe) let list = present.map(\.1)
         // Success is only what the phone lists as deleted, matched by object identity, not by name.
         let deleted: [ObjectIdentifier]
+        Diag.log("delete asked for \(present.map(\.0).joined(separator: ", "))")
         do {
             deleted = try await Timeout.callback(seconds: 30 + 10 * Double(list.count - 1), { done in
-                _ = dev.requestDeleteFiles(list, deleteFailed: { _ in }, completion: { result, _ in
+                _ = dev.requestDeleteFiles(list, deleteFailed: { failed in
+                    Diag.log("delete failed: " + failed.map { "\($0.value.name ?? "?") (\($0.key.rawValue))" }.joined(separator: ", "))
+                }, completion: { result, error in
+                    let answer = result.map { "\($0.key.rawValue): \($0.value.compactMap(\.name).joined(separator: " "))" }.joined(separator: "; ")
+                    Diag.log("delete answer: \(answer.isEmpty ? "nothing" : answer)" + (error.map { " error: \($0.localizedDescription)" } ?? ""))
                     done(.success((result[.successful] ?? []).map(ObjectIdentifier.init)))
                 })
             })

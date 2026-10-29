@@ -60,4 +60,19 @@ func matchTests() {
     check(Matcher.bundleStatus([(photo, .verified(drivePath: "/d/a")), (movie, .verified(drivePath: "/d/b")), (aae, .none)]) == .verified(drivePath: "/d/a"),
           "unmatched AAE does not block verified")
     check(Matcher.bundleStatus([(photo, .none), (movie, .none)]) == .none, "nothing matched is none")
+
+    let original = item("IMG_1234.HEIC")
+    let editedVersion = item("IMG_E1234.HEIC")
+    let editedOnly = [(original, Status.none), (editedVersion, .verified(drivePath: "/d/IMG_1234 edited.HEIC"))]
+    check(Matcher.bundleStatus(editedOnly) == .verified(drivePath: "/d/IMG_1234 edited.HEIC"), "verified edited version covers its original")
+    let originals = Matcher.unbackedOriginals(editedOnly)
+    check(originals.count == 1 && originals[0].original == original && originals[0].editedDrivePath == "/d/IMG_1234 edited.HEIC", "edited version identifies original to copy")
+    if case .possible = Matcher.bundleStatus([(original, .verified(drivePath: "/d/original")), (editedVersion, .none)]) { check(true, "") }
+    else { check(false, "verified original with missing edited version stays possible") }
+    check(!Matcher.isDeletable(Matcher.bundleStatus(editedOnly + [(movie, .none)])), "unverified Live Photo video blocks edited-version exception")
+    let differentOriginal = item("IMG_5678.HEIC")
+    check(!Matcher.isDeletable(Matcher.bundleStatus([(differentOriginal, .none), (editedVersion, .verified(drivePath: "/d/edit"))])), "different original stem is not covered")
+    let allVerified = [(original, Status.verified(drivePath: "/d/original")), (editedVersion, .verified(drivePath: "/d/edit"))]
+    check(Matcher.bundleStatus(allVerified) == .verified(drivePath: "/d/original") && Matcher.unbackedOriginals(allVerified).isEmpty,
+          "fully verified edited bundle needs no original copy")
 }

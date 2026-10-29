@@ -51,4 +51,21 @@ func deleteGateTests() async {
     check(out["a"] == .some(nil), "confirmed by the iPhone counts as deleted")
     check(out["b"] != .some(nil), "still on the iPhone and not confirmed is not deleted")
     check(out["c"] == .some(nil), "already gone before asking (late answer) counts as deleted")
+
+    let original = PhoneItem(id: "DCIM/100APPLE/IMG_2245.HEIC", name: "IMG_2245.HEIC", size: 1, uti: "public.heic")
+    let edited = PhoneItem(id: "DCIM/100APPLE/IMG_E2245.HEIC", name: "IMG_E2245.HEIC", size: 1, uti: "public.heic")
+    let cameraBundle = ItemBundle(id: original.id, primary: original, members: [original, edited], kind: .edited)
+    let png = PhoneItem(id: "DCIM/100APPLE/IMAGE.PNG", name: "IMAGE.PNG", size: 1, uti: "public.png")
+    let pngBundle = ItemBundle(id: png.id, primary: png, members: [png], kind: .single)
+    check(cameraBundle.onlyPhoneCanDelete, "edited-version bundle can only be deleted by the iPhone")
+    check(!pngBundle.onlyPhoneCanDelete, "single PNG can be deleted from the Mac")
+
+    let other = PhoneItem(id: "DCIM/100APPLE/IMG_3000.HEIC", name: "IMG_3000.HEIC", size: 1, uti: "public.heic")
+    let otherBundle = ItemBundle(id: other.id, primary: other, members: [other], kind: .single)
+    let unique = PhoneDelete.handoverList([cameraBundle, otherBundle], allPhoneItems: [original, edited, other])
+    check(unique.names == ["IMG_2245", "IMG_3000"] && unique.notUnique.isEmpty, "handover names are in input order; original and edited version share one folder")
+
+    let duplicateFolder = PhoneItem(id: "DCIM/202609_a/IMG_2245.HEIC", name: "IMG_2245.HEIC", size: 1, uti: "public.heic")
+    let ambiguous = PhoneDelete.handoverList([cameraBundle], allPhoneItems: [original, edited, duplicateFolder])
+    check(ambiguous.names.isEmpty && ambiguous.notUnique == [cameraBundle], "a stem in two folders is handed over for manual deletion")
 }

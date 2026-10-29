@@ -41,7 +41,7 @@ public enum Timeout {
 }
 
 /// Tells a jammed connection from a merely slow file. Lives for one connection: a reconnect or replug starts a new one.
-/// An edited version (IMG_E…) the phone can't make never answers, and every request after it (reads and deletes alike)
+/// An edited version (IMG_E…, ECEIE…) the phone can't make never answers, and every request after it (reads and deletes alike)
 /// hangs too until the session is reopened, so one such hang means jammed. Stored files are served as they are,
 /// so only two of them hanging back to back mean the phone stopped answering.
 public struct HangTracker {

@@ -8,6 +8,8 @@ func namingTests() {
 
     check(Naming.fileName(label: "Bali", number: 1, ext: "HEIC") == "Bali 01.HEIC", "2-digit padding")
     check(Naming.fileName(label: "Bali", number: 100, ext: "HEIC") == "Bali 100.HEIC", "grows past 99")
+    check(Naming.originalName(besideEditedCopy: "/Vol/Memories/IMG_9597.heic", ext: "HEIC") == "IMG_9597 original.HEIC", "original copy name uses phone extension")
+    check(Naming.originalName(besideEditedCopy: "/Vol/Memories/IMG_9597", ext: "") == "IMG_9597 original", "original copy name has no trailing dot without extension")
 
     let names = ["Bali 01.HEIC", "bali 03.mov", "Bali trip 02.JPG", "Other 05.JPG", ".photo-backup-receipt.json"]
     check(Naming.existingNumbers(label: "Bali", in: names) == [1, 3], "existing numbers only for this label, case-insensitive")

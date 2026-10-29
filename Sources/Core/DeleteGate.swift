@@ -40,6 +40,23 @@ public enum DeleteGate {
 }
 
 public enum PhoneDelete {
+    /// Names the person pastes into the iPhone Shortcut, one per line, for bundles the iPhone only deletes itself.
+    /// A bundle whose primary stem (e.g. IMG_2245) is shared with any other file on the phone is left out: the Shortcut
+    /// matches by name, and a look-alike that isn't backed up must never be deleted.
+    public static func handoverList(_ bundles: [ItemBundle], allPhoneItems: [PhoneItem]) -> (names: [String], notUnique: [ItemBundle]) {
+        let foldersByStem = Dictionary(grouping: allPhoneItems, by: \.stem).mapValues { Set($0.map(\.folder)) }
+        var names: [String] = []
+        var notUnique: [ItemBundle] = []
+        for bundle in bundles {
+            if foldersByStem[bundle.primary.stem]?.count == 1 {
+                names.append(bundle.primary.stem)
+            } else {
+                notUnique.append(bundle)
+            }
+        }
+        return (names, notUnique)
+    }
+
     /// Per file: nil when it's gone from the iPhone, otherwise why it's still there. Gone means the phone confirmed
     /// deleting it, or it was already off the phone when asked (a late answer to an earlier request that timed out).
     public static func outcome(ids: [String], present: Set<String>, confirmed: Set<String>) -> [String: String?] {

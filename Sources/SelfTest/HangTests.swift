@@ -5,6 +5,15 @@ func hangTests() {
     func p(_ n: String) -> PhoneItem { PhoneItem(id: "DCIM/1/\(n)", name: n, size: 1, uti: "public.heic") }
     check(p("IMG_E0001.HEIC").isEditedRender && p("img_e0001.jpg").isEditedRender, "IMG_E files are edited versions")
     check(!p("IMG_0001.HEIC").isEditedRender, "plain file is not an edited version")
+    // Files saved from other apps keep a 4-letter prefix; their edited version adds E after it.
+    check(p("ECEIE5383.JPG").isEditedRender && p("DSCFE0019.JPG").isEditedRender, "XXXXE files are edited versions")
+    check(!p("ECEI5383.JPG").isEditedRender && !p("BOS04114.JPEG").isEditedRender && !p("IMG_0001E.HEIC").isEditedRender, "other names are not edited versions")
+    let photo = Bundler.bundles([p("ECEI5383.JPG"), p("ECEIE5383.JPG")])
+    check(photo.count == 1 && photo[0].kind == .edited && photo[0].primary.name == "ECEI5383.JPG", "XXXX original and its edited version are one photo")
+    let mov = "com.apple.quicktime-movie"
+    let clip = Bundler.bundles([PhoneItem(id: "DCIM/1/DGKX8273.MP4", name: "DGKX8273.MP4", size: 1, uti: "public.mpeg-4"),
+                                PhoneItem(id: "DCIM/1/DGKXE8273.MOV", name: "DGKXE8273.MOV", size: 1, uti: mov)])
+    check(clip.count == 1 && clip[0].members.count == 2, "XXXX video and its edited version are one item")
 
     let order = PhoneItem.storedFirst([p("IMG_E0001.HEIC"), p("IMG_0002.HEIC"), p("IMG_E0003.JPG"), p("IMG_0004.MOV")]).map(\.name)
     check(order == ["IMG_0002.HEIC", "IMG_0004.MOV", "IMG_E0001.HEIC", "IMG_E0003.JPG"], "edited versions are read last, order kept (got \(order))")

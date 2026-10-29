@@ -37,9 +37,18 @@ public enum Matcher {
             }
         }
         if missing.isEmpty, let p = firstVerified { return .verified(drivePath: p) }
+        if let exception = unbackedEditedOriginals(media) {
+            return .verified(drivePath: exception.firstEditedDrivePath)
+        }
         if let p = firstVerified { return .possible(drivePath: p, reason: "Not everything is backed up: \(missing.joined(separator: ", "))") }
         if let (p, r) = possible { return .possible(drivePath: p, reason: r) }
         return .none
+    }
+
+    /// Originals that need copying before a bundle made green by its edited versions can be deleted.
+    /// Empty when every media member already has its own verified drive copy.
+    public static func unbackedOriginals(_ members: [(PhoneItem, Status)]) -> [(original: PhoneItem, editedDrivePath: String)] {
+        unbackedEditedOriginals(members.filter { !$0.0.isSidecar })?.originals ?? []
     }
 
     public static func isDeletable(_ s: Status) -> Bool {
@@ -50,5 +59,33 @@ public enum Matcher {
     private static func ratio(_ w: Int?, _ h: Int?) -> Double? {
         guard let w, let h, w > 0, h > 0 else { return nil }
         return Double(max(w, h)) / Double(min(w, h))
+    }
+
+    /// The sole owner of the edited-version exception used by both bundle status and delete preparation.
+    private struct EditedOriginalException {
+        var originals: [(original: PhoneItem, editedDrivePath: String)]
+        var firstEditedDrivePath: String
+    }
+
+    private static func unbackedEditedOriginals(_ media: [(PhoneItem, Status)]) -> EditedOriginalException? {
+        var verifiedEdits: [(item: PhoneItem, drivePath: String)] = []
+        for (item, status) in media {
+            if item.isEditedRender, case .verified(let drivePath) = status {
+                verifiedEdits.append((item, drivePath))
+            }
+        }
+
+        var originals: [(original: PhoneItem, editedDrivePath: String)] = []
+        for (item, status) in media {
+            if case .verified = status {
+                guard item.isEditedRender else { return nil }
+                continue
+            }
+            guard !item.isVideo, !item.isEditedRender,
+                  let edited = verifiedEdits.first(where: { $0.item.stem == item.stem }) else { return nil }
+            originals.append((item, edited.drivePath))
+        }
+        guard let firstEdited = verifiedEdits.first, !originals.isEmpty else { return nil }
+        return EditedOriginalException(originals: originals, firstEditedDrivePath: firstEdited.drivePath)
     }
 }

@@ -28,13 +28,24 @@ public struct PhoneItem: Hashable, Sendable, Codable {
 
     public var isVideo: Bool { UTType(uti)?.conforms(to: .movie) ?? false }
 
-    /// An edited version (IMG_E…). The iPhone creates these on request, and some never finish.
-    public var isEditedRender: Bool { name.uppercased().hasPrefix("IMG_E") }
+    /// An edited version: the original's 4-character prefix plus E (IMG_E0001 for IMG_0001, ECEIE5383 for ECEI5383).
+    /// The iPhone creates these on request, and some never finish.
+    public var isEditedRender: Bool { Self.editedOriginal((name as NSString).deletingPathExtension.uppercased()) != nil }
 
-    /// File name without extension, with the edited-render prefix IMG_E folded into IMG_.
+    /// File name without extension, with an edited version's E dropped so it shares its original's stem.
     public var stem: String {
         let base = (name as NSString).deletingPathExtension.uppercased()
-        return isEditedRender ? "IMG_" + base.dropFirst(5) : base
+        return Self.editedOriginal(base) ?? base
+    }
+
+    /// The original's name for an edited version's upper-cased base name, nil when it isn't one.
+    private static func editedOriginal(_ base: String) -> String? {
+        // (IMG_|[A-Z]{4})E\d+, by hand: a regex here made grouping 8,000 files too slow.
+        let c = Array(base.utf8)
+        guard c.count > 5, c[4] == UInt8(ascii: "E"), c[5...].allSatisfy({ (48...57).contains($0) }) else { return nil }
+        let prefix = c[0..<4]
+        guard prefix.elementsEqual("IMG_".utf8) || prefix.allSatisfy({ (65...90).contains($0) }) else { return nil }
+        return String(decoding: prefix + c[5...], as: UTF8.self)
     }
 
     /// Stored files first, edited versions last, each keeping its order, so a hanging edit can't hold up the rest.
@@ -92,4 +103,6 @@ public struct ItemBundle: Identifiable, Hashable, Sendable {
 
     public var totalSize: Int64 { members.reduce(0) { $0 + $1.size } }
     public var mediaMembers: [PhoneItem] { members.filter { !$0.isSidecar } }
+    /// The iPhone refuses to delete photos with an edited version from a Mac (answers "deleted", keeps them).
+    public var onlyPhoneCanDelete: Bool { members.contains(where: \.isEditedRender) }
 }
