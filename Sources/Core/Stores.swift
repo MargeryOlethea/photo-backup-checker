@@ -49,8 +49,10 @@ public struct ThumbnailStore: Sendable {
         try? data.write(to: url(for: key), options: .atomic)
     }
 
-    private func url(for key: String) -> URL {
-        let name = SHA256.hash(data: Data(key.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
-        return dir.appendingPathComponent(name + ".jpg")
+    private func url(for key: String) -> URL { dir.appendingPathComponent(Self.fileName(for: key) + ".jpg") }
+
+    /// A safe, fixed-length file name for a cache key (keys hold slashes and pipes).
+    public static func fileName(for key: String) -> String {
+        SHA256.hash(data: Data(key.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 }

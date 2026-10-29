@@ -49,7 +49,7 @@ Two targets with a hard boundary:
 
 ### Persistence
 
-Everything lives in `~/Library/Application Support/PhotoBackupChecker/` (demo mode uses a `demo/` subfolder wiped on launch): `drive-index.json`, `phone-hashes.json`, `jev-verdicts.json`, `similar-prints.json`, `preview-scores.json`, `jev-picks.json`, `settle-decisions.json`, `bad-renders.json` (edited version key → failed tries), `thumbs/`, `debug.log`, `deleted-from-iphone.txt`, and the optional `jev.key`. The chosen drive folder is in `UserDefaults` key `driveRoot`; the default is the user's specific external volume path in `AppModel.init`. Each backup folder on the drive gets a `.photo-backup-receipt.json`.
+Everything lives in `~/Library/Application Support/PhotoBackupChecker/` (demo mode uses a `demo/` subfolder wiped on launch): `drive-index.json`, `phone-hashes.json`, `jev-verdicts.json`, `similar-prints.json`, `preview-scores.json`, `jev-picks.json`, `settle-decisions.json`, `bad-renders.json` (edited version key → failed tries), `thumbs/`, `previews/` (full-size copies opened in Preview, kept while the app runs, 2 GB cap), `debug.log`, `deleted-from-iphone.txt`, and the optional `jev.key`. The chosen drive folder is in `UserDefaults` key `driveRoot`; the default is the user's specific external volume path in `AppModel.init`. Each backup folder on the drive gets a `.photo-backup-receipt.json`.
 
 ### Conventions
 

@@ -134,10 +134,7 @@ final class AppModel {
             .appendingPathComponent(demoPhone == nil ? "" : "demo")   // demo keeps its own saved data
         if demoPhone != nil { try? FileManager.default.removeItem(at: appData) }
         try? FileManager.default.createDirectory(at: appData, withIntermediateDirectories: true)
-        // Preview copies left behind by a crash or force-quit.
-        for f in (try? FileManager.default.contentsOfDirectory(atPath: appData.path)) ?? [] where f.hasPrefix("preview-") {
-            try? FileManager.default.removeItem(at: appData.appendingPathComponent(f))
-        }
+        try? FileManager.default.removeItem(at: appData.appendingPathComponent("previews"))   // kept only while the app runs
         let saved = UserDefaults.standard.string(forKey: "driveRoot")
         let root = URL(fileURLWithPath: env["PBC_DEMO_DRIVE"] ?? saved ?? "/Volumes/MARGERY/BACKUP DATA MARGERY/Memories")
         driveRoot = root
@@ -906,7 +903,6 @@ final class AppModel {
         let isVideo = r.item.isVideo
         let drive = await Task.detached { isVideo ? await Self.videoFrame(driveURL, to: 1400) : Self.downscaled(driveURL, to: 1400) }.value
         guard let url = try? await previewFile(for: r.item) else { return (r.phoneThumb, drive ?? r.driveThumb) }
-        defer { try? FileManager.default.removeItem(at: url) }
         let phone = await Task.detached { isVideo ? await Self.videoFrame(url, to: 1400) : Self.downscaled(url, to: 1400) }.value
         return (phone ?? r.phoneThumb, drive ?? r.driveThumb)
     }
@@ -1170,12 +1166,22 @@ final class AppModel {
 
     // MARK: preview
 
-    /// Streams a phone file to a temporary file for preview. Caller deletes it.
+    /// A copy of a phone file on the Mac, for preview. Copies stay in `previews/` while the app runs (up to
+    /// `previewCap` bytes, least recently opened dropped first), so reopening a photo doesn't fetch it again.
+    static let previewCap: Int64 = 2_000_000_000
+    private var previewDir: URL { appData.appendingPathComponent("previews") }
     func previewFile(for item: PhoneItem) async throws -> URL {
-        let url = appData.appendingPathComponent("preview-\(UUID().uuidString).\(item.ext)")
-        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let fm = FileManager.default
+        let url = previewDir.appendingPathComponent(ThumbnailStore.fileName(for: cacheKey(item)) + "." + item.ext)
+        if let size = (try? fm.attributesOfItem(atPath: url.path))?[.size] as? Int64, size == item.size {
+            try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)   // most recently opened
+            return url
+        }
+        try? fm.createDirectory(at: previewDir, withIntermediateDirectories: true)
+        let part = previewDir.appendingPathComponent(UUID().uuidString + ".part")
+        fm.createFile(atPath: part.path, contents: nil)
         do {
-            let h = try FileHandle(forWritingTo: url)
+            let h = try FileHandle(forWritingTo: part)
             defer { try? h.close() }
             let read = phone.reader(id: item.id)
             var off: Int64 = 0
@@ -1185,11 +1191,28 @@ final class AppModel {
                 try h.write(contentsOf: try await read(off, len))
                 off += Int64(len)
             }
+            try? fm.removeItem(at: url)
+            try fm.moveItem(at: part, to: url)
+            trimPreviews(keeping: url)
             return url
         } catch {
-            try? FileManager.default.removeItem(at: url)
+            try? fm.removeItem(at: part)
             throw error
         }
+    }
+
+    /// Over the cap: least recently opened previews go first.
+    private func trimPreviews(keeping: URL) {
+        let fm = FileManager.default
+        let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey]
+        guard let files = try? fm.contentsOfDirectory(at: previewDir, includingPropertiesForKeys: Array(keys)) else { return }
+        var entries = files.compactMap { u -> (url: URL, size: Int64, opened: Date)? in
+            guard let v = try? u.resourceValues(forKeys: keys) else { return nil }
+            return (u, Int64(v.fileSize ?? 0), v.contentModificationDate ?? .distantPast)
+        }
+        var total = entries.reduce(0) { $0 + $1.size }
+        entries.sort { $0.opened < $1.opened }
+        for e in entries where total > Self.previewCap && e.url != keeping { try? fm.removeItem(at: e.url); total -= e.size }
     }
 
     static func describe(_ e: Error) -> String {

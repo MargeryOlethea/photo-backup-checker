@@ -759,13 +759,12 @@ struct PreviewView: View {
             player?.pause(); player = nil; file = nil; error = nil
             do {
                 let url = try await model.previewFile(for: bundle.primary)
-                guard !Task.isCancelled else { try? FileManager.default.removeItem(at: url); return }   // moved on to another item meanwhile
+                guard !Task.isCancelled else { return }   // moved on to another item meanwhile
                 if bundle.primary.isVideo { player = AVPlayer(url: url) }
                 file = url
             } catch { self.error = AppModel.describe(error) }
         }
-        .onChange(of: file) { old, _ in if let old { try? FileManager.default.removeItem(at: old) } }
-        .onDisappear { player?.pause(); if let file { try? FileManager.default.removeItem(at: file) } }
+        .onDisappear { player?.pause() }
     }
 
     private func go(_ i: Int?, _ step: Int) {
