@@ -111,6 +111,7 @@ final class AppModel {
     private var scoreCache: [String: ShotScore] = [:]   // ★ scores per photo
     private var jevPicks: [String: String] = [:]        // close call "a‖b" → winner's key ("" = Jev unsure)
     private var decisions: [String: Settle.Decision] = [:]   // device key → "keep the drive's copy" / "not the same"
+    private var answers: [String: Settle.Answer] = [:]       // device key → Compare answer not fixed yet
     private(set) var settleRows: [SettleRow] = []
     @ObservationIgnored private var settleLoad = 0       // only the latest load may write settleRows
     @ObservationIgnored var tapBlockedUntil = Date.distantPast   // a drag just ended: don't treat it as a click
@@ -146,6 +147,7 @@ final class AppModel {
         try? FileManager.default.removeItem(at: appData.appendingPathComponent("shot-scores.json"))   // scores from whole photos; no longer comparable
         jevPicks = JSONStore.load([String: String].self, from: appData.appendingPathComponent("jev-picks.json"))
         decisions = JSONStore.load([String: Settle.Decision].self, from: appData.appendingPathComponent("settle-decisions.json"))
+        answers = JSONStore.load([String: Settle.Answer].self, from: appData.appendingPathComponent("compare-answers.json"))
         renders = RenderTries.load(from: appData.appendingPathComponent("bad-renders.json"))
         appendEditedVersionDeleteNoteIfNeeded()
         phone.onChange = { [weak self] in self?.phoneChanged() }
@@ -755,9 +757,10 @@ final class AppModel {
     private static let saveQueue = DispatchQueue(label: "PhotoBackupChecker.save", qos: .utility)
 
     private func saveHashCache() {
-        let dir = appData, hashes = hashCache, jev = jevCache, prints = printCache, bad = renders.counts, scores = scoreCache, picks = jevPicks, decided = decisions
+        let dir = appData, hashes = hashCache, jev = jevCache, prints = printCache, bad = renders.counts, scores = scoreCache, picks = jevPicks, decided = decisions, said = answers
         Self.saveQueue.async {
             try? JSONStore.save(decided, to: dir.appendingPathComponent("settle-decisions.json"))
+            try? JSONStore.save(said, to: dir.appendingPathComponent("compare-answers.json"))
             try? JSONStore.save(hashes, to: dir.appendingPathComponent("phone-hashes.json"))
             try? JSONStore.save(jev, to: dir.appendingPathComponent("jev-verdicts.json"))
             try? JSONStore.save(prints, to: dir.appendingPathComponent("similar-prints.json"))
@@ -894,8 +897,17 @@ final class AppModel {
             settleRows[i].phoneThumb = phoneImg
             settleRows[i].driveThumb = driveImg
             settleRows[i].verdict = verdict
-            settleRows[i].action = Settle.suggested(for: verdict)
+            settleRows[i].action = Settle.remembered(answers[deviceKey(r.item)], drive: r.drive, better: r.better)
+                ?? Settle.suggested(for: verdict)
         }
+    }
+
+    /// The person's Compare answer: shown in the list at once and saved straight away, so it survives closing
+    /// the window, a stopped Fix or quitting. Fix can run any time later.
+    func remember(_ r: SettleRow, same: Bool) {
+        answers[deviceKey(r.item)] = Settle.Answer(same: same, drive: r.drive)
+        if let i = settleRows.firstIndex(where: { $0.id == r.id }) { settleRows[i].action = Settle.reconciled(same: same, better: r.better) }
+        saveDecisions()
     }
 
     /// Big versions of both sides for Reconcile: the iPhone file is read in full (as for the preview), the drive file shrunk.
@@ -935,57 +947,76 @@ final class AppModel {
         }
         startWork { [weak self] in
             guard let self else { return }
-            var replaced = 0, added = 0, keptBoth = 0, changed = 0, keptDrive = 0, different = 0
+            var replaced = 0, added = 0, keptBoth = 0, changed = 0, keptDrive = 0, different = 0, unreadable = 0
             do {
                 for (i, (r, action)) in rows.enumerated() {
                     try Task.checkCancellation()
                     self.progress = Progress(label: "Fixing possible copies", done: i, total: rows.count)
-                    let old = URL(fileURLWithPath: r.drive.path)
-                    let folder = old.deletingLastPathComponent()
-                    var primaryPath = old.path
-                    if action == .different {
-                        self.decisions[self.deviceKey(r.item)] = Settle.Decision(kind: .different, drivePath: old.path, driveSize: r.drive.size)
-                        self.memberStatus[r.item.id] = Status.none
-                        self.saveDecisions()
-                        self.settleRows.removeAll { $0.id == r.id }
-                        different += 1
-                        continue
-                    } else if action == .keepDrive {
-                        // Fingerprint the drive copy as it is now; changed since it was compared: leave it.
-                        let hash: String? = try await self.resilient(drive: true, phone: false) {
-                            guard (try? Settle.identity(of: old)) == r.identity else { return nil }
-                            return try await Task.detached { try Fingerprint.sha256(fileAt: old) }.value
-                        }
-                        guard let hash, let size = r.identity?.size else { changed += 1; continue }
-                        self.decisions[self.deviceKey(r.item)] = Settle.Decision(kind: .keepDrive, drivePath: old.path, driveSize: size, driveSHA256: hash)
-                        self.memberStatus[r.item.id] = .verified(drivePath: old.path)
-                        self.saveDecisions()
-                        keptDrive += 1
-                    } else if action == .replace {
-                        let out: Settle.Outcome
-                        do {
-                            out = try await self.resilient(drive: true, phone: true) {
-                                let job = CopyJob(item: r.item, destName: r.item.name, bundleID: r.id, bundleMembers: r.bundle.members.map(\.name), read: self.phone.reader(id: r.item.id))
-                                return try await Settle.replace(job, old: old, expect: r.identity)
+                    // What has to come from the iPhone. An edited version it can't make jams the connection on every
+                    // try, so it gets one try, ever (`RenderTries`); a row that needs a given-up one is skipped.
+                    let fromPhone = r.bundle.members.filter { m in
+                        if m.id == r.item.id { return action == .replace || action == .keepBoth }
+                        if case .verified? = self.memberStatus[m.id] { return false }
+                        return true
+                    }
+                    if fromPhone.contains(where: { !self.renders.shouldTry(self.deviceKey($0)) }) { unreadable += 1; continue }
+                    var reading = r.item
+                    do {
+                        let old = URL(fileURLWithPath: r.drive.path)
+                        let folder = old.deletingLastPathComponent()
+                        var primaryPath = old.path
+                        if action == .different {
+                            self.decisions[self.deviceKey(r.item)] = Settle.Decision(kind: .different, drivePath: old.path, driveSize: r.drive.size)
+                            self.memberStatus[r.item.id] = Status.none
+                            self.saveDecisions()
+                            self.settleRows.removeAll { $0.id == r.id }
+                            self.answers[self.deviceKey(r.item)] = nil
+                            different += 1
+                            continue
+                        } else if action == .keepDrive {
+                            // Fingerprint the drive copy as it is now; changed since it was compared: leave it.
+                            let hash: String? = try await self.resilient(drive: true, phone: false) {
+                                guard (try? Settle.identity(of: old)) == r.identity else { return nil }
+                                return try await Task.detached { try Fingerprint.sha256(fileAt: old) }.value
                             }
-                        } catch Settle.SettleError.driveFileChanged { changed += 1; continue }   // edited on the drive since it was compared: leave it
-                        primaryPath = out.finalPath
-                        self.markVerified(r.item, hash: out.receipt.sha256, path: out.finalPath)
-                        replaced += 1
-                        if !out.oldTrashed { keptBoth += 1 }
-                    } else {
-                        let e = try await self.copyAlongside(r.item, old: old, bundle: r.bundle, into: folder)
-                        primaryPath = folder.appendingPathComponent(e.destName).path
-                        self.markVerified(r.item, hash: e.sha256, path: primaryPath)
-                        added += 1
+                            guard let hash, let size = r.identity?.size else { changed += 1; continue }
+                            self.decisions[self.deviceKey(r.item)] = Settle.Decision(kind: .keepDrive, drivePath: old.path, driveSize: size, driveSHA256: hash)
+                            self.memberStatus[r.item.id] = .verified(drivePath: old.path)
+                            self.saveDecisions()
+                            keptDrive += 1
+                        } else if action == .replace {
+                            let out: Settle.Outcome
+                            do {
+                                out = try await self.resilient(drive: true, phone: true, maxTimeouts: r.item.isEditedRender ? 1 : 2) {
+                                    let job = CopyJob(item: r.item, destName: r.item.name, bundleID: r.id, bundleMembers: r.bundle.members.map(\.name), read: self.phone.reader(id: r.item.id))
+                                    return try await Settle.replace(job, old: old, expect: r.identity)
+                                }
+                            } catch Settle.SettleError.driveFileChanged { changed += 1; continue }   // edited on the drive since it was compared: leave it
+                            primaryPath = out.finalPath
+                            self.markVerified(r.item, hash: out.receipt.sha256, path: out.finalPath)
+                            replaced += 1
+                            if !out.oldTrashed { keptBoth += 1 }
+                        } else {
+                            let e = try await self.copyAlongside(r.item, old: old, bundle: r.bundle, into: folder)
+                            primaryPath = folder.appendingPathComponent(e.destName).path
+                            self.markVerified(r.item, hash: e.sha256, path: primaryPath)
+                            added += 1
+                        }
+                        // The rest of the bundle (a Live Photo's video, an .AAE edit file) goes next to the photo, unless the drive already has that exact file.
+                        for m in r.bundle.members where m.id != r.item.id {
+                            if case .verified? = self.memberStatus[m.id] { continue }
+                            reading = m
+                            let e = try await self.copyAlongside(m, old: URL(fileURLWithPath: primaryPath), bundle: r.bundle, into: folder)
+                            self.markVerified(m, hash: e.sha256, path: folder.appendingPathComponent(e.destName).path)
+                        }
+                        self.settleRows.removeAll { $0.id == r.id }
+                        self.answers[self.deviceKey(r.item)] = nil
+                    } catch is TimedOut {
+                        // The iPhone didn't hand it over: skip this one (the answer stays remembered) and go on with the rest.
+                        Diag.log("fix: skipped \(reading.id), the iPhone didn't answer")
+                        self.noteBadRender(reading)
+                        unreadable += 1
                     }
-                    // The rest of the bundle (a Live Photo's video, an .AAE edit file) goes next to the photo, unless the drive already has that exact file.
-                    for m in r.bundle.members where m.id != r.item.id {
-                        if case .verified? = self.memberStatus[m.id] { continue }
-                        let e = try await self.copyAlongside(m, old: URL(fileURLWithPath: primaryPath), bundle: r.bundle, into: folder)
-                        self.markVerified(m, hash: e.sha256, path: folder.appendingPathComponent(e.destName).path)
-                    }
-                    self.settleRows.removeAll { $0.id == r.id }
                 }
                 var parts: [String] = []
                 if keptDrive > 0 { parts.append("kept the drive's better copy for \(keptDrive) item\(keptDrive == 1 ? "" : "s")") }
@@ -993,6 +1024,7 @@ final class AppModel {
                 if replaced > 0 { parts.append("replaced \(replaced) drive cop\(replaced == 1 ? "y" : "ies") with the iPhone original" + (replaced > keptBoth ? " (old ones are in the drive's Trash)" : "")) }
                 if added > 0 { parts.append("added \(added) iPhone original\(added == 1 ? "" : "s") next to the drive copy") }
                 if keptBoth > 0 { parts.append("\(keptBoth) old cop\(keptBoth == 1 ? "y" : "ies") couldn't go to the Trash, so both were kept") }
+                if unreadable > 0 { parts.append("\(unreadable) the iPhone couldn't hand over \(unreadable == 1 ? "was" : "were") skipped (your answer is kept)") }
                 if changed > 0 { parts.append("\(changed) drive file\(changed == 1 ? "" : "s") changed since the comparison and \(changed == 1 ? "was" : "were") left alone; open Fix again to compare afresh") }
                 self.message = parts.isEmpty ? "Nothing to fix." : "Fixed: " + parts.joined(separator: "; ") + "."
             } catch {
@@ -1006,7 +1038,7 @@ final class AppModel {
     }
 
     private func copyAlongside(_ item: PhoneItem, old: URL, bundle: ItemBundle, into folder: URL) async throws -> ReceiptEntry {
-        try await resilient(drive: true, phone: true) {
+        try await resilient(drive: true, phone: true, maxTimeouts: item.isEditedRender ? 1 : 2) {
             let job = CopyJob(item: item, destName: item.name, bundleID: bundle.id, bundleMembers: bundle.members.map(\.name), read: self.phone.reader(id: item.id))
             return try await Settle.alongside(job, old: old)
         }
@@ -1017,10 +1049,14 @@ final class AppModel {
         Set(decisions.filter { $0.key != key && $0.value.kind == .keepDrive }.map(\.value.drivePath))
     }
 
-    /// Written straight away: an item already shown green must not lose its decision if the app quits mid-batch.
+    /// Written straight away: an item already shown green must not lose its decision if the app quits mid-batch,
+    /// nor a Compare answer its answer. (Also saved with everything else in `saveHashCache`.)
     private func saveDecisions() {
-        let url = appData.appendingPathComponent("settle-decisions.json"), decided = decisions
-        Self.saveQueue.async { try? JSONStore.save(decided, to: url) }
+        let dir = appData, decided = decisions, said = answers
+        Self.saveQueue.async {
+            try? JSONStore.save(decided, to: dir.appendingPathComponent("settle-decisions.json"))
+            try? JSONStore.save(said, to: dir.appendingPathComponent("compare-answers.json"))
+        }
     }
 
     /// The kept drive copy this item counts as backed up by, if that's why it's green (not an exact copy).

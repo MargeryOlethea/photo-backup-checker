@@ -86,6 +86,24 @@ public enum Settle {
         return better == .phone ? .replace : .keepDrive
     }
 
+    /// A Compare answer, remembered as soon as it is given so Fix can run later. Tied to the drive file it was
+    /// about (path, size and last change): if that file is gone or was changed or swapped, the answer no longer applies.
+    public struct Answer: Codable, Sendable, Equatable {
+        public var same: Bool
+        public var drivePath: String
+        public var driveSize: Int64
+        public var driveModified: Date
+        public init(same: Bool, drive: DriveFile) {
+            self.same = same; drivePath = drive.path; driveSize = drive.size; driveModified = drive.modified
+        }
+    }
+
+    /// What Fix does for a remembered answer about this drive file, or nil when there is none for it.
+    public static func remembered(_ a: Answer?, drive: DriveFile, better: Better) -> Action? {
+        guard let a, a.drivePath == drive.path, a.driveSize == drive.size, a.driveModified == drive.modified else { return nil }
+        return reconciled(same: a.same, better: better)
+    }
+
     /// Adds the iPhone file next to `old` without touching it: as "<old stem>.<iPhone ext>", or
     /// "<old stem> (from iPhone).<ext>" when that name is taken or is `old` itself. Never overwrites anything.
     public static func alongside(_ job: CopyJob, old: URL) async throws -> ReceiptEntry {

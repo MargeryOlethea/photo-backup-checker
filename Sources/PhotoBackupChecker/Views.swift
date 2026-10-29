@@ -852,18 +852,17 @@ struct SettleSheet: View {
     let model: AppModel
     let only: Set<String>?
     @Environment(\.dismiss) private var dismiss
-    @State private var chosen: [String: Settle.Action] = [:]   // what the person decided in Reconcile
     @State private var leftOut: Set<String> = []
     @State private var reconciling: SettleRow?
     @State private var loaded = false
 
-    private func action(_ r: SettleRow) -> Settle.Action? { chosen[r.id] ?? r.action }
+    private func action(_ r: SettleRow) -> Settle.Action? { r.action }
 
     var body: some View {
         Group {
             if let r = reconciling {
-                ReconcileView(model: model, row: r) { a in
-                    if let a { chosen[r.id] = a; leftOut.remove(r.id) }
+                ReconcileView(model: model, row: r) { same in
+                    if let same { model.remember(r, same: same); leftOut.remove(r.id) }
                     reconciling = nil
                 }
             } else { list }
@@ -996,7 +995,7 @@ private struct SettleSide: View {
 private struct ReconcileView: View {
     let model: AppModel
     let row: SettleRow
-    let done: (Settle.Action?) -> Void
+    let done: (Bool?) -> Void   // same photo? nil: back without answering
     @State private var phoneImg: CGImage?
     @State private var driveImg: CGImage?
 
@@ -1015,8 +1014,8 @@ private struct ReconcileView: View {
             HStack {
                 Button("Back") { done(nil) }.keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Not the same") { done(Settle.reconciled(same: false, better: r.better)) }
-                Button("Same") { done(Settle.reconciled(same: true, better: r.better)) }
+                Button("Not the same") { done(false) }
+                Button("Same") { done(true) }
                     .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
             }
         }

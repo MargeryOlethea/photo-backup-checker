@@ -45,6 +45,19 @@ func settleTests() async {
     check(Settle.reconciled(same: true, better: .phone) == .replace, "reconciled same, iPhone better: replace")
     check(Settle.reconciled(same: true, better: .drive) == .keepDrive, "reconciled same, drive better: keep drive")
     check(Settle.reconciled(same: false, better: .phone) == .different, "reconciled not the same: separate photo")
+    let shown = DriveFile(path: "/d/a.jpg", size: 10, modified: Date(timeIntervalSince1970: 100))
+    let said = Settle.Answer(same: true, drive: shown)
+    var other = shown
+    check(Settle.remembered(said, drive: shown, better: .phone) == .replace, "remembered same, iPhone better: replace")
+    check(Settle.remembered(said, drive: shown, better: .drive) == .keepDrive, "remembered same, drive better: keep drive")
+    check(Settle.remembered(Settle.Answer(same: false, drive: shown), drive: shown, better: .phone) == .different, "remembered not the same")
+    other.path = "/d/b.jpg"
+    check(Settle.remembered(said, drive: other, better: .phone) == nil, "answer about another drive file doesn't apply")
+    other = shown; other.size = 11
+    check(Settle.remembered(said, drive: other, better: .phone) == nil, "drive file changed size: answer doesn't apply")
+    other = shown; other.modified = Date(timeIntervalSince1970: 200)
+    check(Settle.remembered(said, drive: other, better: .phone) == nil, "drive file swapped for a same-size one: answer doesn't apply")
+    check(Settle.remembered(nil, drive: shown, better: .phone) == nil, "no answer: nothing remembered")
 
     // Remembered decisions.
     let possible = Status.possible(drivePath: "/d/a.jpg", reason: "")
