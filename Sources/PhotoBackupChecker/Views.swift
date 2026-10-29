@@ -810,9 +810,15 @@ struct BackupSheet: View {
         let problem = Naming.validateFolderName(name)
         let label = Naming.label(forFolder: name)
         let first = Naming.nextNumbers(count: 1, label: label, existing: existing)[0]
+        let todo = model.selectedUnbacked
+        let skipped = model.selection.count - todo.count
         VStack(alignment: .leading, spacing: 14) {
-            Label("Back up \(model.selection.count) item\(model.selection.count == 1 ? "" : "s") · \(gb(model.selectedBytes))", systemImage: "externaldrive.badge.plus")
+            Label("Back up \(todo.count) item\(todo.count == 1 ? "" : "s") · \(gb(todo.reduce(0) { $0 + $1.totalSize }))", systemImage: "externaldrive.badge.plus")
                 .font(.title3.weight(.semibold))
+            if skipped > 0 {
+                Text("\(skipped) of the selected item\(skipped == 1 ? " is" : "s are") already backed up and will be skipped.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
             VStack(alignment: .leading, spacing: 6) {
                 Text("Folder name").font(.callout.weight(.medium))
                 TextField("e.g. 2026-10 Bali", text: $name).textFieldStyle(.roundedBorder).frame(width: 440)
@@ -833,7 +839,7 @@ struct BackupSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Back up", action: start).keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
-                    .disabled(problem != nil || label.isEmpty || model.busy)
+                    .disabled(problem != nil || label.isEmpty || todo.isEmpty || model.busy)
             }
         }
         .padding(22)

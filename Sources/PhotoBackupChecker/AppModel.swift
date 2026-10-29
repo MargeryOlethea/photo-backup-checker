@@ -799,7 +799,10 @@ final class AppModel {
     func backup(folderName: String) {
         guard work == nil else { message = "Something else is running. Wait for it to finish (or press Stop), then back up again."; return }
         guard driveAvailable else { message = "Backup drive not found. Plug it in first."; return }
-        let chosen = selectedBundles
+        // Green items already have their exact copy on the drive: copying them again would only make duplicates.
+        let chosen = selectedUnbacked
+        let skipped = selectedBundles.count - chosen.count
+        guard !chosen.isEmpty else { message = "Everything selected is already backed up; nothing was copied."; return }
         let folder = driveRoot.appendingPathComponent(folderName.trimmingCharacters(in: .whitespacesAndNewlines))
         startWork { [weak self] in
             guard let self else { return }
@@ -831,6 +834,7 @@ final class AppModel {
                     self.markVerified(p.item, hash: e.sha256, path: folder.appendingPathComponent(p.destName).path)
                 }
                 self.message = "Backed up \(chosen.count) item\(chosen.count == 1 ? "" : "s") to \(folder.lastPathComponent)."
+                    + (skipped > 0 ? " \(skipped) already backed up \(skipped == 1 ? "was" : "were") skipped." : "")
                     + (leftOut > 0 ? " \(leftOut) edited version(s) the iPhone couldn't make were left out; those items aren't green yet." : "")
                 self.selection = []
             } catch {
@@ -1076,7 +1080,7 @@ final class AppModel {
 
     // MARK: delete
 
-    /// Selected items with no exact copy on the drive: deleting them loses them for good.
+    /// Selected items with no exact copy on the drive: deleting them loses them for good, and only these get backed up.
     var selectedUnbacked: [ItemBundle] { selectedBundles.filter { !Matcher.isDeletable(status(of: $0)) } }
 
     /// Green items are checked against the drive again, one at a time, right before each delete.
