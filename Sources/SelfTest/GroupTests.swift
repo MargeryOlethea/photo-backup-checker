@@ -30,3 +30,25 @@ func groupTests() {
 
     check(Grouping.month.sections([], calendar: cal).isEmpty, "no items: no sections")
 }
+
+func burstEditTests() {
+    let t = Date(timeIntervalSince1970: 1_790_587_258)
+    func it(_ name: String, burst: String? = nil, sidecar: Bool = false) -> PhoneItem {
+        PhoneItem(id: "DCIM/202609_a/" + name, name: name, size: 10, captureDate: t, uti: "public.jpeg", burstUUID: burst, isSidecar: sidecar)
+    }
+    let items = [it("IMG_2245.JPG", burst: "B"), it("IMG_2246.JPG", burst: "B"), it("IMG_E2245.JPG"), it("IMG_E2246.JPG", burst: "B"),
+                 it("IMG_2245.AAE", sidecar: true), it("IMG_3000.JPG"), it("IMG_E3000.JPG")]
+    let bundles = Bundler.bundles(items)
+    let burst = bundles.first { $0.kind == .burst }
+    check(bundles.count == 2 && burst != nil, "a burst's edited shots join the burst instead of showing as their own photos")
+    if let burst {
+        check(Set(burst.mediaMembers.map(\.name)) == ["IMG_2245.JPG", "IMG_2246.JPG"], "only the burst's originals count as its photos")
+        check(burst.members.count == 5, "edited shots and .AAE stay with the burst, so they go when it's deleted")
+        check(!burst.readableMembers.contains(where: \.isEditedRender), "a burst's edited shots are never read from the iPhone")
+        check(burst.onlyPhoneCanDelete, "a burst with edits is still handed to the iPhone Shortcut")
+        let plan = (try? BackupWriter.plan(bundles: [burst], folderName: "2026-09 Trip", existingNames: [])) ?? []
+        check(plan.count == 3 && !plan.contains(where: { $0.item.isEditedRender }), "backing up a burst copies its originals and .AAE, not its edited shots")
+    }
+    let edited = bundles.first { $0.kind == .edited }
+    check(edited?.readableMembers.contains(where: \.isEditedRender) == true, "an ordinary edited photo still backs up its edited version")
+}

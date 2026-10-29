@@ -103,6 +103,8 @@ public struct ItemBundle: Identifiable, Hashable, Sendable {
 
     public var totalSize: Int64 { members.reduce(0) { $0 + $1.size } }
     public var mediaMembers: [PhoneItem] { members.filter { !$0.isSidecar } }
+    /// What can be read from the iPhone: everything but a burst shot's edited version (see `Bundler`).
+    public var readableMembers: [PhoneItem] { members.filter { !($0.isSidecar && $0.isEditedRender) } }
     /// The iPhone refuses to delete photos with an edited version from a Mac (answers "deleted", keeps them).
     public var onlyPhoneCanDelete: Bool { members.contains(where: \.isEditedRender) }
 }

@@ -427,7 +427,7 @@ final class AppModel {
     }
 
     private func runCheck() async throws {
-        let media = phone.items.filter { !$0.isSidecar }
+        let media = bundles.flatMap(\.mediaMembers)
         renders.newRun()
         // No drive: only look for duplicates and similar shots on the iPhone; backup colours stay as they were.
         let withDrive = driveAvailable
@@ -1131,8 +1131,8 @@ final class AppModel {
 
     private func freshHashes(_ b: ItemBundle) async throws -> [String] {
         var out: [String] = []
-        // Every member, edit sidecars too: the delete takes them all.
-        for m in b.members { out.append(try await resilient(drive: false, phone: true) { try await self.hash(m, fresh: true) }) }
+        // Every member, edit sidecars too: the delete takes them all. (A burst shot's edited version can't be read.)
+        for m in b.readableMembers { out.append(try await resilient(drive: false, phone: true) { try await self.hash(m, fresh: true) }) }
         return out.sorted()
     }
 

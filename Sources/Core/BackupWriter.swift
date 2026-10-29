@@ -70,7 +70,7 @@ public enum BackupWriter {
             var numberForStem: [String: Int] = [:]
             let shared = b.kind == .burst ? nil : numbers.next()
             for m in b.mediaMembers where b.kind == .burst { numberForStem[m.stem] = numbers.next() }
-            for m in b.members {
+            for m in b.readableMembers {
                 let n = shared ?? numberForStem[m.stem] ?? numberForStem.values.min() ?? 1
                 var dest = Naming.fileName(label: label, number: n, ext: m.ext)
                 if m.isEditedRender {

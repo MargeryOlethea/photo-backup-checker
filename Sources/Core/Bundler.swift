@@ -4,8 +4,12 @@ import Foundation
 /// When the phone's own grouping signals disagree, files stay separate rather than merged on a guess.
 public enum Bundler {
     public static func bundles(_ items: [PhoneItem]) -> [ItemBundle] {
-        let media = items.filter { !$0.isSidecar }
-        let sidecars = items.filter(\.isSidecar)
+        // A burst shot's edited version: the iPhone lists it but never hands it over (asking jams the connection).
+        // It rides along with its burst like an .AAE, so it is shown, deleted and handed over with it, never read.
+        let burstStems = Set(items.filter { $0.burstUUID != nil && !$0.isSidecar }.map { $0.folder + "/" + $0.stem })
+        func burstEdit(_ i: PhoneItem) -> Bool { i.isEditedRender && (i.burstUUID != nil || burstStems.contains(i.folder + "/" + i.stem)) }
+        let media = items.filter { !$0.isSidecar && !burstEdit($0) }
+        let sidecars = items.filter(\.isSidecar) + items.filter { !$0.isSidecar && burstEdit($0) }.map { var s = $0; s.isSidecar = true; return s }
 
         var groups: [[PhoneItem]] = []
         // Bursts first: same burst id.
