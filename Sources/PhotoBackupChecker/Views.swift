@@ -52,7 +52,8 @@ struct ContentView: View {
         .navigationTitle("Photo Backup Checker")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                DevicePill(icon: "externaldrive.fill", name: "Hard disk", state: model.driveMounted ? "Connected" : "Unplugged",
+                DevicePill(icon: "externaldrive.fill", name: "Hard disk",
+                           state: model.driveMounted ? "Connected" : model.driveChosen ? "Unplugged" : "Not chosen",
                            color: model.driveMounted ? .green : .red)
                 DevicePill(icon: "iphone", name: model.phone.deviceName ?? "iPhone", state: phoneText, color: phoneColor)
             }
@@ -161,6 +162,16 @@ struct StatusStrip: View {
                 .padding(10)
                 .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: Radius.card))
             }
+            if !model.driveChosen {
+                HStack(spacing: 8) {
+                    Image(systemName: "folder.badge.questionmark").foregroundStyle(.tint)
+                    Text("Choose the folder on your backup drive where your photos and videos are kept.")
+                        .font(.callout).frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Choose…") { chooseDrive(model) }.disabled(model.busy)
+                }
+                .padding(10)
+                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: Radius.card))
+            }
             if let m = model.message {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "info.circle.fill").foregroundStyle(.tint)
@@ -175,7 +186,7 @@ struct StatusStrip: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.top, model.pause == nil && model.progress == nil && model.message == nil ? 0 : 10)
+        .padding(.top, model.pause == nil && model.progress == nil && model.message == nil && model.driveChosen ? 0 : 10)
         .padding(.bottom, 2)
     }
 }
@@ -302,7 +313,7 @@ struct SelectionBar: View {
                 Button { model.sheet = .backup } label: { Label("Back up…", systemImage: "externaldrive.badge.plus") }
                     .buttonStyle(allGreen ? AnyButtonStyle(.bordered) : AnyButtonStyle(.borderedProminent))
                     .keyboardShortcut("b", modifiers: .command)
-                    .disabled(model.busy).help("Copy the selected items to the drive (⌘B)")
+                    .disabled(model.busy || !model.driveChosen).help("Copy the selected items to the drive (⌘B)")
                 if model.phone.canDelete {
                     Button(role: .destructive) { model.sheet = .delete } label: { Label("Delete from iPhone…", systemImage: "trash") }
                         .buttonStyle(allGreen ? AnyButtonStyle(.borderedProminent) : AnyButtonStyle(.bordered)).tint(.red)
@@ -529,11 +540,11 @@ struct FooterView: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "folder").foregroundStyle(.secondary)
-            Text(model.driveMounted ? model.driveRoot.lastPathComponent : "Drive folder not found")
+            Text(model.driveMounted ? model.driveRoot.lastPathComponent : model.driveChosen ? "Drive folder not found" : "No backup folder chosen")
                 .foregroundStyle(model.driveMounted ? Color.secondary : Color.red)
                 .lineLimit(1).truncationMode(.middle)
-                .help(model.driveRoot.path)
-            Button("Change…", action: chooseDrive).buttonStyle(.link).disabled(model.busy)
+                .help(model.driveChosen ? model.driveRoot.path : "")
+            Button(model.driveChosen ? "Change…" : "Choose…") { chooseDrive(model) }.buttonStyle(.link).disabled(model.busy)
             Spacer()
             if let t = model.lastChecked { Text("Checked \(t.formatted(date: .omitted, time: .shortened))").foregroundStyle(.secondary) }
             Image(systemName: "icloud.slash").foregroundStyle(.secondary)
@@ -547,13 +558,13 @@ struct FooterView: View {
         .background(.bar)
         .overlay(alignment: .top) { Divider() }
     }
+}
 
-    private func chooseDrive() {
-        let p = NSOpenPanel()
-        p.canChooseDirectories = true; p.canChooseFiles = false; p.prompt = "Use this folder"
-        p.message = "Choose the folder on your drive where your photos and videos are backed up."
-        if p.runModal() == .OK, let url = p.url { model.driveRoot = url; model.recheck() }
-    }
+@MainActor private func chooseDrive(_ model: AppModel) {
+    let p = NSOpenPanel()
+    p.canChooseDirectories = true; p.canChooseFiles = false; p.prompt = "Use this folder"
+    p.message = "Choose the folder on your drive where your photos and videos are backed up."
+    if p.runModal() == .OK, let url = p.url { model.driveRoot = url; model.recheck() }
 }
 
 // MARK: - Clean-up view: similar groups with ★, duplicates, junk screenshots

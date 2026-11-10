@@ -102,8 +102,11 @@ final class AppModel {
     var message: String?
     private(set) var pause: Pause?
     private(set) var driveMounted = false
+    /// False until the person picks a backup folder; until then driveRoot is a placeholder that is never read.
+    private(set) var driveChosen: Bool
     var driveRoot: URL {
         didSet {
+            driveChosen = true
             UserDefaults.standard.set(driveRoot.path, forKey: "driveRoot")
             driveIndex = DriveIndex(root: driveRoot, cacheURL: appData.appendingPathComponent("drive-index.json"))
             driveMounted = driveAvailable
@@ -145,8 +148,9 @@ final class AppModel {
         if demoPhone != nil { try? FileManager.default.removeItem(at: appData) }
         try? FileManager.default.createDirectory(at: appData, withIntermediateDirectories: true)
         try? FileManager.default.removeItem(at: appData.appendingPathComponent("previews"))   // kept only while the app runs
-        let saved = UserDefaults.standard.string(forKey: "driveRoot")
-        let root = URL(fileURLWithPath: env["PBC_DEMO_DRIVE"] ?? saved ?? "/Volumes/MARGERY/BACKUP DATA MARGERY/Memories")
+        let chosen = env["PBC_DEMO_DRIVE"] ?? UserDefaults.standard.string(forKey: "driveRoot")
+        let root = chosen.map(URL.init(fileURLWithPath:)) ?? FileManager.default.homeDirectoryForCurrentUser
+        driveChosen = chosen != nil
         driveRoot = root
         driveIndex = DriveIndex(root: root, cacheURL: appData.appendingPathComponent("drive-index.json"))
         hashCache = JSONStore.load([String: String].self, from: appData.appendingPathComponent("phone-hashes.json"))
@@ -161,7 +165,7 @@ final class AppModel {
         appendEditedVersionDeleteNoteIfNeeded()
         phone.onChange = { [weak self] in self?.phoneChanged() }
         if let demoPhone { phone.startDemo(folder: demoPhone) } else { phone.start() }
-        driveMounted = FileManager.default.fileExists(atPath: root.path)
+        driveMounted = driveAvailable
         let nc = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
             nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
@@ -171,13 +175,13 @@ final class AppModel {
     }
 
     private func refreshDrive() {
-        driveMounted = FileManager.default.fileExists(atPath: driveRoot.path)
+        driveMounted = driveAvailable
         guard driveMounted && needsCheck && !stoppedByUser && phone.catalogReady && !phone.isLocked && !bundles.isEmpty else { return }
         if work == nil { checkAll() } else { autoCheckPending = true }
     }
 
     var hasJevKey: Bool { Jev.loadKey(from: appData) != nil }
-    var driveAvailable: Bool { FileManager.default.fileExists(atPath: driveRoot.path) }
+    var driveAvailable: Bool { driveChosen && FileManager.default.fileExists(atPath: driveRoot.path) }
     var busy: Bool { work != nil }
 
     // MARK: what the grid shows
