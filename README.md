@@ -53,7 +53,7 @@ The pictures below use made-up sample photos, so you can see every screen withou
 
 <img src="docs/tour/4-fix.png" width="760" alt="Fix possible copies window listing iPhone photos next to their drive copies">
 
-**5. Delete from the iPhone.** Each photo is checked against its drive copy one more time, right before it is deleted. If a check fails, that photo is kept.
+**5. Delete from the iPhone.** Each photo is checked against its drive copy one more time, right before it is deleted. If a check fails, that photo is kept. Photos taken with the iPhone camera, and all videos, can only be deleted on the iPhone itself: the app hands their names over and you finish with a one-tap [iPhone Shortcut](https://www.icloud.com/shortcuts/8c90596cf87343ad808163e6098192ea).
 
 <img src="docs/tour/5-delete.png" width="560" alt="Delete confirmation window showing three backed-up photos">
 
@@ -119,7 +119,9 @@ Click **Fix N…** on the Possible copy card, or select some items and click **F
 
 Only all-green selections can be deleted. Right before deleting, every copy is checked against the drive again.
 
-The iPhone refuses some deletes from a Mac: any photo that has an edited version, and every video. It reports them as deleted but keeps them. For those, the app copies their names to the clipboard instead, and you run an iPhone Shortcut named **Delete listed photos**:
+The iPhone refuses some deletes from a Mac: any photo that has an edited version, and every video. It reports them as deleted but keeps them. For those, the app copies their names to the clipboard instead, and you run an iPhone Shortcut named **Delete listed photos**.
+
+**[Get the Shortcut](https://www.icloud.com/shortcuts/8c90596cf87343ad808163e6098192ea)**: open the link on your iPhone and tap **Add Shortcut**. Or build it yourself in the Shortcuts app:
 
 1. Get Clipboard
 2. Split Text by New Lines
