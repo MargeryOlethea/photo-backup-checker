@@ -11,6 +11,15 @@ private func mp(_ w: Int?, _ h: Int?) -> String? {
 }
 private enum Radius { static let card: CGFloat = 12, tile: CGFloat = 8, badge: CGFloat = 4 }
 
+private extension Color {
+    /// The app's highlight colour: the plum from the icon, lighter in dark mode so it stays readable.
+    static let plum = Color(nsColor: NSColor(name: nil) {
+        $0.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.68, green: 0.50, blue: 0.95, alpha: 1)
+            : NSColor(srgbRed: 0.54, green: 0.25, blue: 0.75, alpha: 1)
+    })
+}
+
 private extension Status {
     var color: Color? {
         switch self { case .verified: .green; case .possible: .orange; case .none: nil }
@@ -21,6 +30,40 @@ private extension Status {
         case .possible(_, let r): "Possible copy, not identical. \(r)"
         case .none: "Not backed up yet"
         }
+    }
+}
+
+/// A link that shows how to get the ready-made "Delete listed photos" iPhone Shortcut: a code to scan with the
+/// iPhone (the Shortcut has to end up on the phone, and this app runs on the Mac), or the same page on this Mac.
+private struct ShortcutLink: View {
+    static let url = URL(string: "https://www.icloud.com/shortcuts/8c90596cf87343ad808163e6098192ea")!
+    static let code: NSImage? = {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(url.absoluteString.utf8), forKey: "inputMessage")
+        guard let out = filter.outputImage else { return nil }
+        let rep = NSCIImageRep(ciImage: out)
+        let image = NSImage(size: rep.size)
+        image.addRepresentation(rep)
+        return image
+    }()
+    let title: String
+    @State private var shown = false
+
+    var body: some View {
+        Button(title) { shown = true }.buttonStyle(.borderless)
+            .popover(isPresented: $shown) {
+                VStack(spacing: 10) {
+                    Text("Get the “Delete listed photos” Shortcut").font(.headline)
+                    if let code = Self.code {
+                        Image(nsImage: code).interpolation(.none).resizable().frame(width: 180, height: 180)
+                            .padding(10).background(.white, in: RoundedRectangle(cornerRadius: Radius.tile))
+                    }
+                    Text("Point your iPhone's camera at this code, then tap Add Shortcut.")
+                        .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                    Button("Open on this Mac instead") { NSWorkspace.shared.open(Self.url) }.buttonStyle(.borderless)
+                }
+                .padding(16).frame(width: 260).tint(Color.plum)
+            }
     }
 }
 
@@ -49,6 +92,7 @@ struct ContentView: View {
             FooterView(model: model)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .tint(Color.plum)
         .navigationTitle("Photo Backup Checker")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -59,13 +103,16 @@ struct ContentView: View {
             }
         }
         .sheet(item: $model.sheet) { sheet in
-            switch sheet {
-            case .preview(let b): PreviewView(model: model, bundle: b, list: model.visible, onOpen: { model.sheet = .preview($0) })
-            case .backup: BackupSheet(model: model)
-            case .delete: DeleteSheet(model: model)
-            case .settle(let only): SettleSheet(model: model, only: only)
-            case .readyList: ReadyToDeleteView(model: model)
+            Group {
+                switch sheet {
+                case .preview(let b): PreviewView(model: model, bundle: b, list: model.visible, onOpen: { model.sheet = .preview($0) })
+                case .backup: BackupSheet(model: model)
+                case .delete: DeleteSheet(model: model)
+                case .settle(let only): SettleSheet(model: model, only: only)
+                case .readyList: ReadyToDeleteView(model: model)
+                }
             }
+            .tint(Color.plum)   // a sheet is its own window and does not inherit the main window's tint
         }
     }
 
@@ -97,7 +144,7 @@ struct ContentView: View {
                     Image(systemName: "checkmark.circle").font(.system(size: 40, weight: .light)).foregroundStyle(.secondary)
                     Text("Nothing here").font(.title3.weight(.medium))
                     Text("No items are “\(model.filter.rawValue)” right now.").foregroundStyle(.secondary)
-                    Button("Show all") { model.filter = .all }.buttonStyle(.link)
+                    Button("Show all") { model.filter = .all }.buttonStyle(.borderless)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
@@ -170,19 +217,20 @@ struct StatusStrip: View {
                     Button("Choose…") { chooseDrive(model) }.disabled(model.busy)
                 }
                 .padding(10)
-                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: Radius.card))
+                .background(Color.plum.opacity(0.12), in: RoundedRectangle(cornerRadius: Radius.card))
             }
             if let m = model.message {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "info.circle.fill").foregroundStyle(.tint)
                     Text(m).font(.callout).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                    if m.contains("Shortcut") { ShortcutLink(title: "Get the Shortcut") }
                     if m.hasPrefix("Deleted") {
-                        Button("Show list") { NSWorkspace.shared.open(model.deleteLogURL) }.buttonStyle(.link)
+                        Button("Show list") { NSWorkspace.shared.open(model.deleteLogURL) }.buttonStyle(.borderless)
                     }
                     Button { model.message = nil } label: { Image(systemName: "xmark") }.buttonStyle(.borderless).help("Dismiss")
                 }
                 .padding(10)
-                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: Radius.card))
+                .background(Color.plum.opacity(0.12), in: RoundedRectangle(cornerRadius: Radius.card))
             }
         }
         .padding(.horizontal, 16)
@@ -225,7 +273,7 @@ struct SummaryCards: View {
                     Text(gb(bytes)).foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                     if let action {
-                        Button(action.0, action: action.1).controlSize(.small).buttonStyle(.bordered).tint(c == .secondary ? .accentColor : c)
+                        Button(action.0, action: action.1).controlSize(.small).buttonStyle(.bordered).tint(c == .secondary ? .plum : c)
                     }
                 }
                 Text(hint).font(.caption).foregroundStyle(.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
@@ -329,7 +377,7 @@ struct SelectionBar: View {
                 if mix.possible > 0 {
                     chip(.orange, "\(mix.possible) possible copy")
                     if model.selectedBundles.contains(where: model.canSettle) {
-                        Button("Fix possible copies…") { model.sheet = .settle(only: model.selection) }.buttonStyle(.link).disabled(model.busy)
+                        Button("Fix possible copies…") { model.sheet = .settle(only: model.selection) }.buttonStyle(.borderless).disabled(model.busy)
                     }
                 }
                 if mix.none > 0 { chip(.secondary, "\(mix.none) not backed up") }
@@ -448,6 +496,7 @@ struct DeleteSheet: View {
         if !phone.isEmpty {
             Label("Handed to the iPhone Shortcut: \(phone.count). Their names go to your clipboard; run “Delete listed photos” on the iPhone afterwards.", systemImage: "iphone")
                 .font(.callout).fixedSize(horizontal: false, vertical: true)
+            ShortcutLink(title: "Don't have the Shortcut yet?").font(.callout)
             strip(phone)
         }
     }
@@ -507,8 +556,8 @@ private struct DragToSelect: ViewModifier {
             .onPreferenceChange(TileFrames.self) { frames = $0 }
             .overlay(alignment: .topLeading) {
                 if let rect {
-                    Rectangle().fill(Color.accentColor.opacity(0.12))
-                        .overlay(Rectangle().strokeBorder(Color.accentColor, lineWidth: 1))
+                    Rectangle().fill(Color.plum.opacity(0.12))
+                        .overlay(Rectangle().strokeBorder(Color.plum, lineWidth: 1))
                         .frame(width: rect.width, height: rect.height)
                         .offset(x: rect.minX, y: rect.minY)
                         .allowsHitTesting(false)
@@ -544,7 +593,7 @@ struct FooterView: View {
                 .foregroundStyle(model.driveMounted ? Color.secondary : Color.red)
                 .lineLimit(1).truncationMode(.middle)
                 .help(model.driveChosen ? model.driveRoot.path : "")
-            Button(model.driveChosen ? "Change…" : "Choose…") { chooseDrive(model) }.buttonStyle(.link).disabled(model.busy)
+            Button(model.driveChosen ? "Change…" : "Choose…") { chooseDrive(model) }.buttonStyle(.borderless).disabled(model.busy)
             Spacer()
             if let t = model.lastChecked { Text("Checked \(t.formatted(date: .omitted, time: .shortened))").foregroundStyle(.secondary) }
             Image(systemName: "icloud.slash").foregroundStyle(.secondary)
@@ -655,7 +704,7 @@ struct TileView: View {
                 else { Rectangle().fill(.quaternary) }
             }
             .frame(width: Self.side, height: Self.side).clipped()
-            .overlay { if selected { Color.accentColor.opacity(0.2) } }
+            .overlay { if selected { Color.plum.opacity(0.2) } }
             .clipShape(shape)
             .contentShape(shape)
             // Click: preview (selection untouched). ⌘-click toggles, ⇧-click selects a range.
@@ -699,7 +748,7 @@ struct TileView: View {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 20, weight: .medium))
                     .symbolRenderingMode(.palette)
-                    .foregroundStyle(Color.white, selected ? Color.accentColor : Color.clear)
+                    .foregroundStyle(Color.white, selected ? Color.plum : Color.clear)
                     .background(Circle().fill(selected ? Color.clear : Color.black.opacity(0.25)))
                     .shadow(color: .black.opacity(0.45), radius: 1.5)
                     .padding(6)
@@ -710,7 +759,7 @@ struct TileView: View {
             .frame(width: Self.side, height: Self.side, alignment: .topTrailing)
         }
         .frame(width: Self.side, height: Self.side)
-        .overlay(shape.strokeBorder(selected ? Color.accentColor : (status?.color ?? .clear).opacity(0.9), lineWidth: selected ? 3 : 2))
+        .overlay(shape.strokeBorder(selected ? Color.plum : (status?.color ?? .clear).opacity(0.9), lineWidth: selected ? 3 : 2))
         .scaleEffect(hover ? 1.02 : 1)
         .animation(.easeOut(duration: 0.12), value: hover)
         .onHover { hover = $0 }
@@ -785,7 +834,7 @@ struct PreviewView: View {
                     Label("Best of its similar shots: \(r)", systemImage: "star.fill").foregroundStyle(.yellow)
                 }
                 if model.canSettle(bundle) {
-                    Button("Fix…") { model.sheet = .settle(only: [bundle.id]) }.buttonStyle(.link).disabled(model.busy)
+                    Button("Fix…") { model.sheet = .settle(only: [bundle.id]) }.buttonStyle(.borderless).disabled(model.busy)
                         .help("Fix this possible copy: keep the better version, or compare them yourself")
                 }
                 Spacer()
@@ -991,7 +1040,7 @@ struct SettleSheet: View {
                 else { Label("Not sure: compare them", systemImage: "questionmark.circle").foregroundStyle(.orange).lineLimit(1) }
                 if r.verdict != nil {
                     Button(a == nil ? "Compare…" : "Compare again…") { reconciling = r }
-                        .buttonStyle(a == nil ? AnyButtonStyle(.borderedProminent) : AnyButtonStyle(.link))
+                        .buttonStyle(a == nil ? AnyButtonStyle(.borderedProminent) : AnyButtonStyle(.borderless))
                 }
             }
             .frame(width: 260, alignment: .trailing)
