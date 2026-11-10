@@ -33,6 +33,40 @@ private extension Status {
     }
 }
 
+/// A link that shows how to get the ready-made "Delete listed photos" iPhone Shortcut: a code to scan with the
+/// iPhone (the Shortcut has to end up on the phone, and this app runs on the Mac), or the same page on this Mac.
+private struct ShortcutLink: View {
+    static let url = URL(string: "https://www.icloud.com/shortcuts/8c90596cf87343ad808163e6098192ea")!
+    static let code: NSImage? = {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(url.absoluteString.utf8), forKey: "inputMessage")
+        guard let out = filter.outputImage else { return nil }
+        let rep = NSCIImageRep(ciImage: out)
+        let image = NSImage(size: rep.size)
+        image.addRepresentation(rep)
+        return image
+    }()
+    let title: String
+    @State private var shown = false
+
+    var body: some View {
+        Button(title) { shown = true }.buttonStyle(.borderless)
+            .popover(isPresented: $shown) {
+                VStack(spacing: 10) {
+                    Text("Get the “Delete listed photos” Shortcut").font(.headline)
+                    if let code = Self.code {
+                        Image(nsImage: code).interpolation(.none).resizable().frame(width: 180, height: 180)
+                            .padding(10).background(.white, in: RoundedRectangle(cornerRadius: Radius.tile))
+                    }
+                    Text("Point your iPhone's camera at this code, then tap Add Shortcut.")
+                        .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                    Button("Open on this Mac instead") { NSWorkspace.shared.open(Self.url) }.buttonStyle(.borderless)
+                }
+                .padding(16).frame(width: 260).tint(Color.plum)
+            }
+    }
+}
+
 // MARK: - Main window
 
 struct ContentView: View {
@@ -189,6 +223,7 @@ struct StatusStrip: View {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "info.circle.fill").foregroundStyle(.tint)
                     Text(m).font(.callout).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+                    if m.contains("Shortcut") { ShortcutLink(title: "Get the Shortcut") }
                     if m.hasPrefix("Deleted") {
                         Button("Show list") { NSWorkspace.shared.open(model.deleteLogURL) }.buttonStyle(.borderless)
                     }
@@ -461,6 +496,7 @@ struct DeleteSheet: View {
         if !phone.isEmpty {
             Label("Handed to the iPhone Shortcut: \(phone.count). Their names go to your clipboard; run “Delete listed photos” on the iPhone afterwards.", systemImage: "iphone")
                 .font(.callout).fixedSize(horizontal: false, vertical: true)
+            ShortcutLink(title: "Don't have the Shortcut yet?").font(.callout)
             strip(phone)
         }
     }
