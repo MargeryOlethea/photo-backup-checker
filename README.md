@@ -31,7 +31,7 @@ Built for people who aren't technical: the wording in the app is plain English, 
 
 ## Development approach
 
-Photo Backup Checker was built through an AI-assisted development workflow. The maintainer defined the product requirements, safety rules, user experience, and acceptance criteria, then validated the app with automated checks and real iPhone and backup-drive testing. Automated assistance contributed much of the implementation; the source is public so its behaviour can be inspected and reviewed.
+I designed Photo Backup Checker and built it with AI coding assistants. The product requirements, the safety rules for what may be deleted and when, the user experience, and the acceptance criteria are mine, and I validated each change with the automated self-tests and with a real iPhone and backup drive. The source is public so its behaviour can be inspected and reviewed.
 
 > [!CAUTION]
 > This app can copy and request deletion of personal photos. Keep an independent backup of anything you cannot afford to lose, review the safeguards described below, and validate the app with your own setup before relying on it.
