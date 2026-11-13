@@ -19,7 +19,7 @@ Thanks for helping. This app handles people's only copies of their photos, so ch
 - **Never weaken the safety rules.** Read the "Safety invariants" section of [CLAUDE.md](CLAUDE.md) before touching backing up, matching, or deleting. A change that could lose a photo will not be merged, however useful it is otherwise.
 - **Plain words in the app.** "Fingerprint", not "hash"; "hard disk", not "volume". The app is made for people who aren't technical.
 - **Small pull requests.** One fix or feature each.
-- **AI-written code is welcome**, since this project is vibe coded itself. You are still responsible for it: read it, test it, and explain in the pull request what it does.
+- **AI-assisted contributions are welcome.** Contributors remain responsible for understanding, testing, and explaining every change included in a pull request.
 
 ## Reporting a security or privacy problem
 

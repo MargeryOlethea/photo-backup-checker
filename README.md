@@ -11,7 +11,6 @@
 <p align="center">
   <img src="https://img.shields.io/badge/macOS-14%2B-8a3fc0" alt="macOS 14 or later">
   <img src="https://img.shields.io/badge/license-MIT-ff6b5e" alt="MIT license">
-  <img src="https://img.shields.io/badge/vibe%20coded-yes-ffb347" alt="Vibe coded">
 </p>
 
 <p align="center">
@@ -30,8 +29,12 @@ From there the app can **back up** what's missing, **fix** the amber ones, and *
 
 Built for people who aren't technical: the wording in the app is plain English, and never losing a photo comes before everything else.
 
-> [!WARNING]
-> **This app is vibe coded.** Almost all of the code was written by an AI coding assistant (Claude Code), steered and tested by a person on a real iPhone and a real backup drive. It has a test suite and strict safety rules, but it has not had a professional code review. Keep a second backup of anything you can't afford to lose, and read the code before you trust it with your photos.
+## Development approach
+
+I designed Photo Backup Checker and built it with AI coding assistants. The product requirements, the safety rules for what may be deleted and when, the user experience, and the acceptance criteria are mine, and I validated each change with the automated self-tests and with a real iPhone and backup drive. The source is public so its behaviour can be inspected and reviewed.
+
+> [!CAUTION]
+> This app can copy and request deletion of personal photos. Keep an independent backup of anything you cannot afford to lose, review the safeguards described below, and validate the app with your own setup before relying on it.
 
 ## Take the tour
 

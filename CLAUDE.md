@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A macOS 14+ SwiftUI app (Swift 6 tools, SwiftPM, no Xcode project) that lists the photos/videos on a USB-connected iPhone and marks which ones already exist on a backup drive, byte-for-byte. It can back up selected items to the drive, replace weaker drive copies ("settle"), and delete verified items from the phone. Built for non-technical users; copy in the UI is plain English and safety (never losing a photo) is the top design constraint. The project is vibe coded (written mostly by an AI assistant) and open source under MIT.
+A macOS 14+ SwiftUI app (Swift 6 tools, SwiftPM, no Xcode project) that lists the photos/videos on a USB-connected iPhone and marks which ones already exist on a backup drive, byte-for-byte. It can back up selected items to the drive, replace weaker drive copies ("settle"), and delete verified items from the phone. Built for non-technical users; copy in the UI is plain English and safety (never losing a photo) is the top design constraint. The project uses an AI-assisted development workflow and is open source under MIT.
 
 ## Commands
 
