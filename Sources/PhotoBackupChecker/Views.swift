@@ -230,8 +230,8 @@ struct StatusStrip: View {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "info.circle.fill").foregroundStyle(.tint)
                     Text(m).font(.callout).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-                    if m.contains("Shortcut") { ShortcutLink(title: "Get the Shortcut") }
-                    if m.hasPrefix("Deleted") {
+                    if model.messageLinks.contains(.shortcut) { ShortcutLink(title: "Get the Shortcut") }
+                    if model.messageLinks.contains(.deleteLog) {
                         Button("Show list") { NSWorkspace.shared.open(model.deleteLogURL) }.buttonStyle(.borderless)
                     }
                     Button { model.message = nil } label: { Image(systemName: "xmark") }.buttonStyle(.borderless).help("Dismiss")

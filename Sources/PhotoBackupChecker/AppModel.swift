@@ -98,7 +98,10 @@ final class AppModel {
         didSet { UserDefaults.standard.set(grouping.rawValue, forKey: "grouping") }
     }
     var progress: Progress?
-    var message: String?
+    /// Any new message drops the buttons of the one before; the step that wrote it sets its own.
+    var message: String? { didSet { messageLinks = [] } }
+    enum MessageLink { case shortcut, deleteLog }
+    private(set) var messageLinks: Set<MessageLink> = []
     private(set) var pause: Pause?
     private(set) var driveMounted = false
     /// False until the person picks a backup folder; until then driveRoot is a placeholder that is never read.
@@ -1303,6 +1306,8 @@ final class AppModel {
             if !kept.isEmpty { lines.append("Kept some: " + kept.prefix(3).joined(separator: "; ")) }
             if receiptFailed { lines.append("Couldn't write the receipt file.") }
             self.message = lines.joined(separator: " ")
+            if !handoverNames.isEmpty { self.messageLinks.insert(.shortcut) }
+            if deleted + deletedUnbacked + deletedTidy > 0 || !handoverNames.isEmpty { self.messageLinks.insert(.deleteLog) }
             self.saveStores()
         }
     }
