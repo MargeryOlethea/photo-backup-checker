@@ -76,11 +76,11 @@ struct ContentView: View {
         let _ = model.phoneState
         VStack(spacing: 0) {
             StatusStrip(model: model)
-            if model.bundles.isEmpty && model.phone.deviceName == nil {
+            if model.bundles.isEmpty && model.phone.connection == .unplugged {
                 placeholder("iphone.gen3", "Plug in your iPhone", "Use the cable, unlock the phone and tap Trust if it asks.")
-            } else if model.bundles.isEmpty && model.phone.isLocked {
+            } else if model.bundles.isEmpty && model.phone.connection == .locked {
                 placeholder("lock.iphone", "Unlock your iPhone", "The app continues as soon as the phone is unlocked.")
-            } else if model.bundles.isEmpty && !model.phone.catalogReady {
+            } else if model.bundles.isEmpty && model.phone.connection == .reading {
                 placeholder("photo.on.rectangle.angled", "Reading your iPhone…", "This takes a few seconds.", spinner: true)
             } else {
                 if model.showsBackup { SummaryCards(model: model) }
@@ -117,12 +117,19 @@ struct ContentView: View {
     }
 
     private var phoneText: String {
-        if model.phone.deviceName == nil { return "Unplugged" }
-        if model.phone.isLocked { return "Locked" }
-        return model.phone.catalogReady ? "Connected" : "Reading…"
+        switch model.phone.connection {
+        case .unplugged: "Unplugged"
+        case .locked: "Locked"
+        case .reading: "Reading…"
+        case .connected: "Connected"
+        }
     }
     private var phoneColor: Color {
-        model.phone.deviceName == nil ? .red : model.phone.isLocked || !model.phone.catalogReady ? .orange : .green
+        switch model.phone.connection {
+        case .unplugged: .red
+        case .locked, .reading: .orange
+        case .connected: .green
+        }
     }
 
     private func placeholder(_ icon: String, _ title: String, _ detail: String, spinner: Bool = false) -> some View {

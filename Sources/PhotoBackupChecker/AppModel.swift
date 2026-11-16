@@ -10,7 +10,6 @@ struct CleanupInfo: Equatable {
     var duplicate = false
     var similarGroup: Int?
     var jev: Jev.Verdict?
-    var jevConfidence: Double?
     var best = false                 // ★ the one to keep in its similar group
     var bestReason: String?
     var isCandidate: Bool { duplicate || similarGroup != nil || jev == .junk }
@@ -410,7 +409,7 @@ final class AppModel {
 
     private func saveNow() {
         lastSave = Date()
-        saveHashCache()
+        saveStores()
         let index = driveIndex
         Task { try? await index.save() }
     }
@@ -424,7 +423,7 @@ final class AppModel {
             catch is CancellationError { self.stoppedByUser = true; self.message = "Check stopped. Press “Check again” when you're ready." }
             catch is PhoneGone { self.message = "iPhone was disconnected. Plug it back in to continue." }
             catch { self.message = "Check stopped: \(error.localizedDescription)" }
-            self.saveHashCache()
+            self.saveStores()
             try? await self.driveIndex.save()
         }
     }
@@ -540,7 +539,7 @@ final class AppModel {
         var primaryHashes: [String: String] = [:]
         for b in bundles { if let h = knownHash(b.primary) { primaryHashes[b.id] = h } }
         var info: [String: CleanupInfo] = [:]
-        for b in bundles { if let j = jevCache[deviceKey(b.primary)] { info[b.id] = CleanupInfo(jev: j.verdict, jevConfidence: j.confidence) } }
+        for b in bundles { if let j = jevCache[deviceKey(b.primary)] { info[b.id] = CleanupInfo(jev: j.verdict) } }
         for group in Cleanup.exactDuplicates(hashes: primaryHashes) { for id in group { info[id, default: CleanupInfo()].duplicate = true } }
         try await findSimilar(into: &info)
         try Task.checkCancellation()
@@ -773,7 +772,7 @@ final class AppModel {
     /// One queue, so saves land in the order they were made and an older one can't overwrite a newer one.
     private static let saveQueue = DispatchQueue(label: "PhotoBackupChecker.save", qos: .utility)
 
-    private func saveHashCache() {
+    private func saveStores() {
         let dir = appData, hashes = hashCache, jev = jevCache, prints = printCache, bad = renders.counts, scores = scoreCache, picks = jevPicks, decided = decisions, said = answers
         Self.saveQueue.async {
             try? JSONStore.save(decided, to: dir.appendingPathComponent("settle-decisions.json"))
@@ -868,7 +867,7 @@ final class AppModel {
                 catch { self.message = (self.message ?? "") + " Couldn't write the receipt file." }
             }
             self.recomputeBundleStatuses()
-            self.saveHashCache()
+            self.saveStores()
             _ = try? await self.driveIndex.scan { _, _ in }
             try? await self.driveIndex.save()
         }
@@ -1058,7 +1057,7 @@ final class AppModel {
                 self.message = "Fixing stopped after \(replaced + added) item(s): \(Self.describe(error))"
             }
             self.recomputeBundleStatuses()
-            self.saveHashCache()
+            self.saveStores()
             _ = try? await self.driveIndex.scan { _, _ in }
             try? await self.driveIndex.save()
         }
@@ -1077,7 +1076,7 @@ final class AppModel {
     }
 
     /// Written straight away: an item already shown green must not lose its decision if the app quits mid-batch,
-    /// nor a Compare answer its answer. (Also saved with everything else in `saveHashCache`.)
+    /// nor a Compare answer its answer. (Also saved with everything else in `saveStores`.)
     private func saveDecisions() {
         let dir = appData, decided = decisions, said = answers
         Self.saveQueue.async {
@@ -1299,7 +1298,7 @@ final class AppModel {
             if !kept.isEmpty { lines.append("Kept some: " + kept.prefix(3).joined(separator: "; ")) }
             if receiptFailed { lines.append("Couldn't write the receipt file.") }
             self.message = lines.joined(separator: " ")
-            self.saveHashCache()
+            self.saveStores()
         }
     }
 
@@ -1356,13 +1355,12 @@ final class AppModel {
                     let data = try await self.resilient(drive: false, phone: true) { try await self.phone.fullData(id: b.primary.id) }
                     let (v, c) = try await Jev.classify(imageData: data, key: key)
                     self.cleanup[b.id, default: CleanupInfo()].jev = v
-                    self.cleanup[b.id, default: CleanupInfo()].jevConfidence = c
                     self.jevCache[self.deviceKey(b.primary)] = JevResult(verdict: v, confidence: c)
                     self.saveIfDue()
                 } catch is PhoneGone { self.message = "iPhone was disconnected."; break }
                 catch { failures += 1 }
             }
-            self.saveHashCache()
+            self.saveStores()
             if failures > 0 { self.message = "Jev couldn't check \(failures) screenshot(s)." }
             else if self.message == nil { self.message = "Checked \(shots.count) screenshot(s) with Jev." }
         }

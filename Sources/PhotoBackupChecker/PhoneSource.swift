@@ -17,6 +17,13 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
     private(set) var deviceName: String?
     private(set) var deviceID: String?
     private(set) var isLocked = false
+    /// What the person sees of the connection; unplugged outranks locked, locked outranks still reading.
+    enum Connection { case unplugged, locked, reading, connected }
+    var connection: Connection {
+        if deviceName == nil { return .unplugged }
+        if isLocked { return .locked }
+        return catalogReady ? .connected : .reading
+    }
     private(set) var canDelete = false
     private(set) var catalogReady = false
     private(set) var items: [PhoneItem] = [] { didSet { itemsByID = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }) } }
