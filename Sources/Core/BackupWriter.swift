@@ -154,7 +154,7 @@ public enum BackupWriter {
             try writeAll(fd: fd, d)
             offset += Int64(len)
         }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        return Fingerprint.hex(hasher.finalize())
     }
 
     private static func writeAll(fd: Int32, _ d: Data) throws {

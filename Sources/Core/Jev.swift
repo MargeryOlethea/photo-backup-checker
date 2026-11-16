@@ -37,10 +37,15 @@ public enum Jev {
         return try! JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
     }
 
-    public static func verdict(fromResponse data: Data) throws -> (Verdict, Double) {
-        struct Answer: Decodable { let choice: String; let confidence: Double }
+    private struct Answer: Decodable { let choice: String; let confidence: Double }
+
+    private static func answer(_ question: String, in data: Data) -> Answer? {
         struct Resp: Decodable { let answers: [String: Answer] }
-        guard let a = (try? JSONDecoder().decode(Resp.self, from: data))?.answers["verdict"],
+        return (try? JSONDecoder().decode(Resp.self, from: data))?.answers[question]
+    }
+
+    public static func verdict(fromResponse data: Data) throws -> (Verdict, Double) {
+        guard let a = answer("verdict", in: data),
               let v = Verdict(rawValue: a.choice) else { throw JevError.badResponse }
         let trusted = (0...1).contains(a.confidence) && a.confidence >= minConfidence
         return (trusted ? v : .unsure, a.confidence)
@@ -96,9 +101,7 @@ public enum Jev {
 
     /// 0 = first, 1 = second; nil when Jev isn't confident enough (Apple's pick stands).
     public static func pickAnswer(fromResponse data: Data) -> Int? {
-        struct Answer: Decodable { let choice: String; let confidence: Double }
-        struct Resp: Decodable { let answers: [String: Answer] }
-        guard let a = (try? JSONDecoder().decode(Resp.self, from: data))?.answers["best"],
+        guard let a = answer("best", in: data),
               (0...1).contains(a.confidence), a.confidence >= minConfidence else { return nil }
         return ["first": 0, "second": 1][a.choice]
     }

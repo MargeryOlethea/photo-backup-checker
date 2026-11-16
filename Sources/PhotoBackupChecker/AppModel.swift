@@ -561,7 +561,7 @@ final class AppModel {
         var needed = Set<String>()
         for (i, b) in stills.enumerated() {
             for c in stills[(i + 1)...] {
-                if c.primary.captureDate!.timeIntervalSince(b.primary.captureDate!) > 600 { break }
+                if c.primary.captureDate!.timeIntervalSince(b.primary.captureDate!) > Cleanup.similarWindow { break }
                 needed.insert(b.id); needed.insert(c.id)
             }
         }
@@ -799,6 +799,8 @@ final class AppModel {
         return d
     }
 
+    private static let thumbMemoryLimit = 600
+
     /// Grid thumbnail: from memory, else the saved or fetched preview.
     func thumbnail(for item: PhoneItem) async -> CGImage? {
         let key = deviceKey(item)
@@ -807,7 +809,7 @@ final class AppModel {
               let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
         thumbMemory[key] = img
         thumbOrder.append(key)
-        if thumbOrder.count > 600 { thumbMemory[thumbOrder.removeFirst()] = nil }
+        if thumbOrder.count > Self.thumbMemoryLimit { thumbMemory[thumbOrder.removeFirst()] = nil }
         return img
     }
 
@@ -1264,7 +1266,7 @@ final class AppModel {
                             if case .verified(let path)? = self.memberStatus[item.id] { return path }
                             return nil
                         }.sorted().first
-                        self.logHandedOver(b, backedUpAt: backedUpAt)
+                        self.logDeleted(b, backedUpAt: backedUpAt, handedToPhone: true)
                     }
                 }
                 self.selection.subtract(macDeletedIDs)
@@ -1322,16 +1324,10 @@ final class AppModel {
     /// A plain record of every delete, kept on the Mac: when, which files, and whether a backup existed.
     var deleteLogURL: URL { appData.appendingPathComponent("deleted-from-iphone.txt") }
     /// `backedUpAt` is captured before the delete: afterwards the item is gone and has no status.
-    private func logDeleted(_ b: ItemBundle, backedUpAt path: String?) {
-        let where_ = path.map { "backed up at \($0)" } ?? "NOT backed up"
-        let line = "\(Date().formatted(.iso8601))\t\(b.members.map(\.name).joined(separator: " + "))\t\(where_)\n"
-        appendDeleteLog(line)
-    }
-
-    private func logHandedOver(_ b: ItemBundle, backedUpAt path: String?) {
-        let where_ = path.map { "backed up at \($0)" } ?? "NOT backed up"
-        let line = "\(Date().formatted(.iso8601))\t\(b.members.map(\.name).joined(separator: " + "))\thanded to iPhone, \(where_)\n"
-        appendDeleteLog(line)
+    private func logDeleted(_ b: ItemBundle, backedUpAt path: String?, handedToPhone: Bool = false) {
+        let backup = path.map { "backed up at \($0)" } ?? "NOT backed up"
+        let fate = handedToPhone ? "handed to iPhone, \(backup)" : backup
+        appendDeleteLog("\(Date().formatted(.iso8601))\t\(b.members.map(\.name).joined(separator: " + "))\t\(fate)\n")
     }
 
     private func appendDeleteLog(_ line: String) {
