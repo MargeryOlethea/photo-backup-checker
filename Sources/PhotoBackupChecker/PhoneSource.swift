@@ -226,7 +226,7 @@ final class PhoneSource: NSObject, @preconcurrency ICDeviceBrowserDelegate, @pre
                 captureDate: f.exifCreationDate ?? f.creationDate, uti: f.uti ?? "",
                 pixelWidth: f.width > 0 ? f.width : nil, pixelHeight: f.height > 0 ? f.height : nil,
                 duration: f.duration > 0 ? f.duration : nil,
-                groupUUID: f.groupUUID, relatedUUID: f.relatedUUID, burstUUID: f.burstUUID,
+                groupUUID: f.groupUUID, burstUUID: f.burstUUID,
                 isSidecar: sidecarNames.contains(name) || (name as NSString).pathExtension.uppercased() == "AAE"))
         }
         files = map

@@ -226,9 +226,7 @@ final class AppModel {
 
     /// Why "Delete from iPhone" can't run right now, in plain words; nil when it can.
     var deleteBlocker: String? {
-        if selection.isEmpty { return nil }
-        if busy { return "Delete opens up when the current task finishes (or press Stop)." }
-        return nil
+        selection.isEmpty || !busy ? nil : "Delete opens up when the current task finishes (or press Stop)."
     }
 
     /// What the selection holds: backed up / possible copy / not backed up.
@@ -259,7 +257,6 @@ final class AppModel {
 
     /// Every similar group at once: select all but each group's ★.
     func selectAllButBestEverywhere() { for g in similarGroups { selectAllButBest(g) } }
-
 
     /// Similar-shot groups, each in grid order, for the clean-up view.
     var similarGroups: [[ItemBundle]] {
@@ -393,7 +390,7 @@ final class AppModel {
     /// The connection is jammed: a request hung and everything after it would too. Asks for a replug straight away
     /// and waits for the phone to list its photos again; the next step then runs on the fresh connection.
     /// The session is also reopened in software meanwhile, in case the phone answers that first.
-    /// ponytail: the software reopen has never once worked on the owner's iPhone, so nobody waits for it any more.
+    /// The software reopen has never once worked on the owner's iPhone, so nobody waits for it any more.
     private func waitForReplug() async throws {
         saveNow()
         guard phone.deviceName != nil else { phone.reconnect(); return }   // unplugged: clears the jam; the next step waits for the replug
@@ -517,7 +514,7 @@ final class AppModel {
             for f in all { if let d = f.captureDate { byTime[Int(d.timeIntervalSince1970), default: []].append(f) } }
 
             // Kept drive copies count only while their bytes are unchanged: re-fingerprint each.
-            // ponytail: full re-read every check; skip when size+mtime match the kept file if kept videos make checks slow.
+            // Known limit: full re-read every check; skip when size+mtime match the kept file if kept videos make checks slow.
             let sizes = Dictionary(all.map { ($0.path, $0.size) }, uniquingKeysWith: { a, _ in a })
             var keptNow: [String: String] = [:]   // drive path → fingerprint now
             for item in media {
@@ -1161,9 +1158,8 @@ final class AppModel {
             guard let self else { return }
             var deleted = 0, deletedUnbacked = 0, deletedTidy = 0, refused = 0
             var kept: [String] = []
-            let chosen = green
-            let macDeletes = chosen.filter { !$0.onlyPhoneCanDelete }
-            let handover = chosen.filter(\.onlyPhoneCanDelete)
+            let macDeletes = green.filter { !$0.onlyPhoneCanDelete }
+            let handover = green.filter(\.onlyPhoneCanDelete)
             let macOthers = others.filter { !$0.onlyPhoneCanDelete }
             var handoverOthers = others.filter(\.onlyPhoneCanDelete)
             let macTidy = tidy.filter { !$0.onlyPhoneCanDelete }
@@ -1173,7 +1169,7 @@ final class AppModel {
             var handoverNames: [String] = []
             var notUnique: [ItemBundle] = []
             do {
-                let media = chosen.flatMap(\.mediaMembers)
+                let media = green.flatMap(\.mediaMembers)
                 for (i, m) in media.enumerated() where self.sessionHashes[self.cacheKey(m)] == nil && self.keptDrive(m) == nil {
                     try Task.checkCancellation()
                     self.progress = Progress(label: "Re-checking photos and videos on iPhone before deleting", done: i, total: media.count)
@@ -1181,11 +1177,11 @@ final class AppModel {
                 }
                 // An edited version can stand in for its original only long enough to make a safe, separate copy.
                 // Once copied, the usual per-member delete gate below still checks every drive file again.
-                for (i, b) in chosen.enumerated() {
+                for (i, b) in green.enumerated() {
                     let originals = Matcher.unbackedOriginals(b.members.map { ($0, self.memberStatus[$0.id] ?? .none) })
                     for pair in originals {
                         try Task.checkCancellation()
-                        self.progress = Progress(label: "Copying originals to the drive before deleting", done: i, total: chosen.count)
+                        self.progress = Progress(label: "Copying originals to the drive before deleting", done: i, total: green.count)
                         let folder = URL(fileURLWithPath: pair.editedDrivePath).deletingLastPathComponent()
                         let name = Naming.originalName(besideEditedCopy: pair.editedDrivePath, ext: pair.original.ext)
                         do {

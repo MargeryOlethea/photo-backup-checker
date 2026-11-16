@@ -453,7 +453,7 @@ struct DeleteSheet: View {
                     Label("\(unbacked.count) \(unbacked.count == 1 ? "is" : "are") NOT backed up. \(unbacked.count == 1 ? "It" : "They") will be gone forever.", systemImage: "exclamationmark.triangle.fill")
                         .font(.headline).foregroundStyle(.red)
                     if possible > 0 {
-                        Text("\(possible) of these \(possible == 1 ? "has" : "have") a similar file on the drive that isn't identical. Consider “Review possible copies” first.")
+                        Text("\(possible) of these \(possible == 1 ? "has" : "have") a similar file on the drive that isn't identical. Consider “Fix possible copies” first.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
                     rows(unbacked)
@@ -810,7 +810,7 @@ struct PreviewView: View {
         VStack(spacing: 12) {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(bundle.members.filter { !$0.isSidecar }.map(\.name).joined(separator: " + ")).font(.headline)
+                    Text(bundle.mediaMembers.map(\.name).joined(separator: " + ")).font(.headline)
                     Text([bundle.primary.captureDate?.formatted(date: .long, time: .shortened), mp(bundle.primary.pixelWidth, bundle.primary.pixelHeight), gb(bundle.totalSize)]
                         .compactMap { $0 }.joined(separator: " · ")).font(.callout).foregroundStyle(.secondary)
                 }
@@ -968,8 +968,6 @@ struct SettleSheet: View {
     @State private var lastCompared: String?   // the list comes back scrolled to this row, not to the top
     @State private var loaded = false
 
-    private func action(_ r: SettleRow) -> Settle.Action? { r.action }
-
     var body: some View {
         Group {
             if let r = reconciling {
@@ -988,8 +986,8 @@ struct SettleSheet: View {
     private var list: some View {
         let rows = model.settleRows
         let comparing = rows.filter { $0.verdict == nil }.count
-        let todo = rows.filter { !leftOut.contains($0.id) }.compactMap { r in action(r).map { (r.id, $0) } }
-        let unsure = rows.filter { $0.verdict != nil && action($0) == nil }.count
+        let todo = rows.filter { !leftOut.contains($0.id) }.compactMap { r in r.action.map { (r.id, $0) } }
+        let unsure = rows.filter { $0.verdict != nil && $0.action == nil }.count
         return VStack(alignment: .leading, spacing: 12) {
             Text("Fix possible copies").font(.title3.weight(.semibold))
             Text("The drive has a file that looks like each of these iPhone photos and videos but isn't identical. Where the iPhone's is better, it replaces the drive copy (the old one goes to the drive's Trash). Where the drive's is better, that copy is kept and the item turns green. Where the app isn't sure, press “Compare” and decide yourself.")
@@ -1025,7 +1023,7 @@ struct SettleSheet: View {
     }
 
     @ViewBuilder private func row(_ r: SettleRow) -> some View {
-        let a = action(r)
+        let a = r.action
         HStack(spacing: 12) {
             Toggle("", isOn: Binding(get: { a != nil && !leftOut.contains(r.id) },
                                      set: { if $0 { leftOut.remove(r.id) } else { leftOut.insert(r.id) } }))
@@ -1036,7 +1034,7 @@ struct SettleSheet: View {
             Spacer()
             VStack(alignment: .trailing, spacing: 4) {
                 if r.verdict == nil { ProgressView().controlSize(.small) }
-                else if let a { Label(Self.consequence(a, r), systemImage: Self.icon(a)).foregroundStyle(a == .different ? Color.secondary : .green).lineLimit(1) }
+                else if let a { Label(Self.consequence(a), systemImage: Self.icon(a)).foregroundStyle(a == .different ? Color.secondary : .green).lineLimit(1) }
                 else { Label("Not sure: compare them", systemImage: "questionmark.circle").foregroundStyle(.orange).lineLimit(1) }
                 if r.verdict != nil {
                     Button(a == nil ? "Compare…" : "Compare again…") { reconciling = r }
@@ -1048,7 +1046,7 @@ struct SettleSheet: View {
         .padding(.vertical, 4)
     }
 
-    static func consequence(_ a: Settle.Action, _ r: SettleRow) -> String {
+    static func consequence(_ a: Settle.Action) -> String {
         switch a {
         case .replace: "Replace with the iPhone original"
         case .keepDrive: "Keep the drive's copy"
@@ -1157,7 +1155,7 @@ struct ReadyToDeleteView: View {
                 .font(.callout).foregroundStyle(.secondary)
             List(ready) { b in
                 HStack {
-                    Text(b.members.filter { !$0.isSidecar }.map(\.name).joined(separator: ", "))
+                    Text(b.mediaMembers.map(\.name).joined(separator: ", "))
                     Spacer()
                     Text(b.primary.captureDate.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "").foregroundStyle(.secondary)
                 }
