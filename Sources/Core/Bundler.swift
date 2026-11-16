@@ -14,7 +14,7 @@ public enum Bundler {
         var groups: [[PhoneItem]] = []
         // Bursts first: same burst id.
         let bursts = Dictionary(grouping: media.filter { $0.burstUUID != nil }, by: { $0.burstUUID! })
-        groups += bursts.values.map { $0 }
+        groups += bursts.values
         // Everything else: same folder + stem, if their group ids agree.
         let rest = media.filter { $0.burstUUID == nil }
         for (_, same) in Dictionary(grouping: rest, by: { $0.folder + "/" + $0.stem }) {
@@ -57,5 +57,3 @@ public enum Bundler {
         return ItemBundle(id: primary.id, primary: primary, members: [primary] + sorted.filter { $0 != primary }, kind: kind)
     }
 }
-
-private func < (a: (Date, String), b: (Date, String)) -> Bool { a.0 != b.0 ? a.0 < b.0 : a.1 < b.1 }

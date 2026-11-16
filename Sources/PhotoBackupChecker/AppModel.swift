@@ -339,6 +339,9 @@ final class AppModel {
         return nil
     }
 
+    /// Retries (3 s apart, so about a minute) while the phone is still listing a file it was asked for.
+    private static let listWaitRetries = 20
+
     /// Runs one step. If the drive or phone drops out (or the phone stops answering), waits until
     /// it is back and runs the same step again. A jammed connection is reopened first (`waitForReplug`), so a step
     /// that timed out gets a working connection for its retry. Only cancelling stops it; other errors are passed on.
@@ -365,7 +368,7 @@ final class AppModel {
                 let reason = blocker(drive: drive, phone: needsPhone)
                     ?? (error is TimedOut ? .phoneNotResponding : nil)
                     ?? (error is PhoneGone && needsPhone ? .phoneUnplugged : nil)
-                    ?? (error is NotOnPhone && needsPhone && notListed <= 20 ? .phoneLoading : nil)
+                    ?? (error is NotOnPhone && needsPhone && notListed <= Self.listWaitRetries ? .phoneLoading : nil)
                 guard let reason else { throw error }
                 // Out of tries: hand the file back to the caller to skip or report. Callers that retry on their own
                 // (maxTimeouts 1) get the error at once; the rest get a fresh connection and a full set of tries first.
@@ -402,9 +405,11 @@ final class AppModel {
         }
     }
 
+    private static let saveInterval: TimeInterval = 60
+
     /// Saves what has been learned so far, at most once a minute.
     private func saveIfDue() {
-        if Date().timeIntervalSince(lastSave) >= 60 { saveNow() }
+        if Date().timeIntervalSince(lastSave) >= Self.saveInterval { saveNow() }
     }
 
     private func saveNow() {

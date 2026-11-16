@@ -3,13 +3,13 @@ import AppKit
 import AVKit
 import Core
 
-private func gb(_ b: Int64) -> String { ByteCountFormatter.string(fromByteCount: b, countStyle: .file) }
+private func sizeText(_ b: Int64) -> String { ByteCountFormatter.string(fromByteCount: b, countStyle: .file) }
 private func mp(_ w: Int?, _ h: Int?) -> String? {
     guard let w, let h, w > 0, h > 0 else { return nil }
     let m = Double(w * h) / 1_000_000
     return String(format: m < 10 ? "%.1f MP" : "%.0f MP", m)
 }
-private enum Radius { static let card: CGFloat = 12, tile: CGFloat = 8, badge: CGFloat = 4 }
+private enum Radius { static let card: CGFloat = 12, tile: CGFloat = 8, thumb: CGFloat = 6, badge: CGFloat = 4 }
 
 private extension Color {
     /// The app's highlight colour: the plum from the icon, lighter in dark mode so it stays readable.
@@ -207,7 +207,7 @@ struct StatusStrip: View {
             }
             if let p = model.progress {
                 HStack(spacing: 10) {
-                    if p.total > 0 { ProgressView(value: Double(p.done), total: Double(max(p.total, 1))).frame(maxWidth: 260) }
+                    if p.total > 0 { ProgressView(value: Double(p.done), total: Double(p.total)).frame(maxWidth: 260) }
                     else { ProgressView().controlSize(.small) }
                     Text(p.total > 0 ? "\(p.label) · \(p.done) of \(p.total)" : p.label).font(.callout).monospacedDigit()
                     Spacer()
@@ -277,7 +277,7 @@ struct SummaryCards: View {
                 .font(.callout.weight(.medium))
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("\(n)").font(.system(size: 26, weight: .semibold, design: .rounded)).monospacedDigit()
-                    Text(gb(bytes)).foregroundStyle(.secondary)
+                    Text(sizeText(bytes)).foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                     if let action {
                         Button(action.0, action: action.1).controlSize(.small).buttonStyle(.bordered).tint(c == .secondary ? .plum : c)
@@ -361,7 +361,7 @@ struct SelectionBar: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Text("\(model.selection.count) selected").font(.headline)
-                Text(gb(model.selectedBytes)).foregroundStyle(.secondary)
+                Text(sizeText(model.selectedBytes)).foregroundStyle(.secondary)
                 Button("Clear") { model.selection = [] }.buttonStyle(.borderless).keyboardShortcut(.escape, modifiers: [])
                     .help("Clear the selection (Esc)")
                 Spacer()
@@ -436,7 +436,7 @@ struct DeleteSheet: View {
         ].compactMap { $0 }
         let deleteTitle = deleteParts.joined(separator: " · ") + (unbacked.isEmpty ? "" : " forever")
         VStack(alignment: .leading, spacing: 14) {
-            Label("Delete \(all.count) item\(all.count == 1 ? "" : "s") (\(gb(all.reduce(0) { $0 + $1.totalSize }))) from your iPhone?", systemImage: "trash")
+            Label("Delete \(all.count) item\(all.count == 1 ? "" : "s") (\(sizeText(all.reduce(0) { $0 + $1.totalSize }))) from your iPhone?", systemImage: "trash")
                 .font(.title3.weight(.semibold))
             if !green.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
@@ -531,7 +531,7 @@ struct Thumb: View {
     @State private var image: CGImage?
     var body: some View {
         Group { if let image { Image(decorative: image, scale: 1).resizable().scaledToFill() } else { Rectangle().fill(.quaternary) } }
-            .frame(width: side, height: side).clipShape(RoundedRectangle(cornerRadius: 6))
+            .frame(width: side, height: side).clipShape(RoundedRectangle(cornerRadius: Radius.thumb))
             .task(id: item.id) { image = await model.thumbnail(for: item) }
     }
 }
@@ -770,7 +770,7 @@ struct TileView: View {
         .scaleEffect(hover ? 1.02 : 1)
         .animation(.easeOut(duration: 0.12), value: hover)
         .onHover { hover = $0 }
-        .help([bundle.primary.name, bundle.primary.captureDate?.formatted(date: .abbreviated, time: .shortened), gb(bundle.totalSize), status?.label,
+        .help([bundle.primary.name, bundle.primary.captureDate?.formatted(date: .abbreviated, time: .shortened), sizeText(bundle.totalSize), status?.label,
                bundle.onlyPhoneCanDelete ? "Deleted via the iPhone Shortcut" : "Deleted by the Mac"]
             .compactMap { $0 }.joined(separator: " · "))
         .task(id: bundle.id) { image = await model.thumbnail(for: bundle.primary) }
@@ -818,7 +818,7 @@ struct PreviewView: View {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(bundle.mediaMembers.map(\.name).joined(separator: " + ")).font(.headline)
-                    Text([bundle.primary.captureDate?.formatted(date: .long, time: .shortened), mp(bundle.primary.pixelWidth, bundle.primary.pixelHeight), gb(bundle.totalSize)]
+                    Text([bundle.primary.captureDate?.formatted(date: .long, time: .shortened), mp(bundle.primary.pixelWidth, bundle.primary.pixelHeight), sizeText(bundle.totalSize)]
                         .compactMap { $0 }.joined(separator: " · ")).font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -898,7 +898,7 @@ struct BackupSheet: View {
         let todo = model.selectedUnbacked
         let skipped = model.selection.count - todo.count
         VStack(alignment: .leading, spacing: 14) {
-            Label("Back up \(todo.count) item\(todo.count == 1 ? "" : "s") · \(gb(todo.reduce(0) { $0 + $1.totalSize }))", systemImage: "externaldrive.badge.plus")
+            Label("Back up \(todo.count) item\(todo.count == 1 ? "" : "s") · \(sizeText(todo.reduce(0) { $0 + $1.totalSize }))", systemImage: "externaldrive.badge.plus")
                 .font(.title3.weight(.semibold))
             if skipped > 0 {
                 Text("\(skipped) of the selected item\(skipped == 1 ? " is" : "s are") already backed up and will be skipped.")
@@ -1088,7 +1088,7 @@ private struct SettleSide: View {
                 Text(phone ? "iPhone" : "Drive").font(.callout.weight(.semibold))
                 if best { Text("better").font(.caption2.weight(.bold)).padding(.horizontal, 4).background(.green.opacity(0.25), in: Capsule()) }
             }
-            Text([format, detail, gb(phone ? r.item.size : r.drive.size)].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+            Text([format, detail, sizeText(phone ? r.item.size : r.drive.size)].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
             Text(name).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
         }
         let pic = Group {
@@ -1103,7 +1103,7 @@ private struct SettleSide: View {
             }
         } else {
             HStack(spacing: 8) {
-                pic.frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: 6))
+                pic.frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: Radius.thumb))
                 info.frame(width: 170, alignment: .leading)
             }
         }

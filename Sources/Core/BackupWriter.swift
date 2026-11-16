@@ -82,16 +82,20 @@ public enum BackupWriter {
         return out
     }
 
+    /// Space left free on the drive after a backup, and the size a FAT drive can't hold in one file.
+    private static let freeSpaceMargin: Int64 = 100_000_000
+    private static let fatFileLimit: Int64 = 4 * 1024 * 1024 * 1024
+
     public static func preflight(folder: URL, totalBytes: Int64, largestFile: Int64) throws {
         var probe = folder
         while !FileManager.default.fileExists(atPath: probe.path) && probe.path != "/" { probe.deleteLastPathComponent() }
         let v = try? probe.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
         let free = v?.volumeAvailableCapacityForImportantUsage ?? v?.volumeAvailableCapacity.map(Int64.init) ?? 0
-        if free < 100_000_000 || free - 100_000_000 < totalBytes { throw BackupError.notEnoughSpace }
+        if free < freeSpaceMargin || free - freeSpaceMargin < totalBytes { throw BackupError.notEnoughSpace }
         var fs = statfs()
         if statfs(probe.path, &fs) == 0 {
             let type = withUnsafeBytes(of: fs.f_fstypename) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
-            if type == "msdos" && largestFile >= 4 * 1024 * 1024 * 1024 { throw BackupError.fileTooLargeForFAT(type) }
+            if type == "msdos" && largestFile >= fatFileLimit { throw BackupError.fileTooLargeForFAT(type) }
         }
     }
 
