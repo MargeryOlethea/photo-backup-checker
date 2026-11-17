@@ -12,17 +12,16 @@ public struct PhoneItem: Hashable, Sendable, Codable {
     public var pixelHeight: Int?
     public var duration: Double?
     public var groupUUID: String?
-    public var relatedUUID: String?
     public var burstUUID: String?
     public var isSidecar: Bool
 
     public init(id: String, name: String, size: Int64, captureDate: Date? = nil, uti: String,
                 pixelWidth: Int? = nil, pixelHeight: Int? = nil, duration: Double? = nil,
-                groupUUID: String? = nil, relatedUUID: String? = nil, burstUUID: String? = nil,
+                groupUUID: String? = nil, burstUUID: String? = nil,
                 isSidecar: Bool = false) {
         self.id = id; self.name = name; self.size = size; self.captureDate = captureDate; self.uti = uti
         self.pixelWidth = pixelWidth; self.pixelHeight = pixelHeight; self.duration = duration
-        self.groupUUID = groupUUID; self.relatedUUID = relatedUUID; self.burstUUID = burstUUID
+        self.groupUUID = groupUUID; self.burstUUID = burstUUID
         self.isSidecar = isSidecar
     }
 

@@ -86,7 +86,6 @@ public actor DriveIndex {
         }
     }
 
-    public func files(withSize size: Int64) -> [DriveFile] { byPath.values.filter { $0.size == size } }
     public func allFiles() -> [DriveFile] { Array(byPath.values) }
 
     /// Reads capture date, pixel size and duration once; used for the "possible copy" check.

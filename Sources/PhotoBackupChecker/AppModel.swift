@@ -10,7 +10,6 @@ struct CleanupInfo: Equatable {
     var duplicate = false
     var similarGroup: Int?
     var jev: Jev.Verdict?
-    var jevConfidence: Double?
     var best = false                 // ★ the one to keep in its similar group
     var bestReason: String?
     var isCandidate: Bool { duplicate || similarGroup != nil || jev == .junk }
@@ -99,7 +98,10 @@ final class AppModel {
         didSet { UserDefaults.standard.set(grouping.rawValue, forKey: "grouping") }
     }
     var progress: Progress?
-    var message: String?
+    /// Any new message drops the buttons of the one before; the step that wrote it sets its own.
+    var message: String? { didSet { messageLinks = [] } }
+    enum MessageLink { case shortcut, deleteLog }
+    private(set) var messageLinks: Set<MessageLink> = []
     private(set) var pause: Pause?
     private(set) var driveMounted = false
     /// False until the person picks a backup folder; until then driveRoot is a placeholder that is never read.
@@ -226,9 +228,7 @@ final class AppModel {
 
     /// Why "Delete from iPhone" can't run right now, in plain words; nil when it can.
     var deleteBlocker: String? {
-        if selection.isEmpty { return nil }
-        if busy { return "Delete opens up when the current task finishes (or press Stop)." }
-        return nil
+        selection.isEmpty || !busy ? nil : "Delete opens up when the current task finishes (or press Stop)."
     }
 
     /// What the selection holds: backed up / possible copy / not backed up.
@@ -259,7 +259,6 @@ final class AppModel {
 
     /// Every similar group at once: select all but each group's ★.
     func selectAllButBestEverywhere() { for g in similarGroups { selectAllButBest(g) } }
-
 
     /// Similar-shot groups, each in grid order, for the clean-up view.
     var similarGroups: [[ItemBundle]] {
@@ -343,6 +342,9 @@ final class AppModel {
         return nil
     }
 
+    /// Retries (3 s apart, so about a minute) while the phone is still listing a file it was asked for.
+    private static let listWaitRetries = 20
+
     /// Runs one step. If the drive or phone drops out (or the phone stops answering), waits until
     /// it is back and runs the same step again. A jammed connection is reopened first (`waitForReplug`), so a step
     /// that timed out gets a working connection for its retry. Only cancelling stops it; other errors are passed on.
@@ -369,7 +371,7 @@ final class AppModel {
                 let reason = blocker(drive: drive, phone: needsPhone)
                     ?? (error is TimedOut ? .phoneNotResponding : nil)
                     ?? (error is PhoneGone && needsPhone ? .phoneUnplugged : nil)
-                    ?? (error is NotOnPhone && needsPhone && notListed <= 20 ? .phoneLoading : nil)
+                    ?? (error is NotOnPhone && needsPhone && notListed <= Self.listWaitRetries ? .phoneLoading : nil)
                 guard let reason else { throw error }
                 // Out of tries: hand the file back to the caller to skip or report. Callers that retry on their own
                 // (maxTimeouts 1) get the error at once; the rest get a fresh connection and a full set of tries first.
@@ -393,7 +395,7 @@ final class AppModel {
     /// The connection is jammed: a request hung and everything after it would too. Asks for a replug straight away
     /// and waits for the phone to list its photos again; the next step then runs on the fresh connection.
     /// The session is also reopened in software meanwhile, in case the phone answers that first.
-    /// ponytail: the software reopen has never once worked on the owner's iPhone, so nobody waits for it any more.
+    /// The software reopen has never once worked on the owner's iPhone, so nobody waits for it any more.
     private func waitForReplug() async throws {
         saveNow()
         guard phone.deviceName != nil else { phone.reconnect(); return }   // unplugged: clears the jam; the next step waits for the replug
@@ -406,14 +408,16 @@ final class AppModel {
         }
     }
 
+    private static let saveInterval: TimeInterval = 60
+
     /// Saves what has been learned so far, at most once a minute.
     private func saveIfDue() {
-        if Date().timeIntervalSince(lastSave) >= 60 { saveNow() }
+        if Date().timeIntervalSince(lastSave) >= Self.saveInterval { saveNow() }
     }
 
     private func saveNow() {
         lastSave = Date()
-        saveHashCache()
+        saveStores()
         let index = driveIndex
         Task { try? await index.save() }
     }
@@ -427,7 +431,7 @@ final class AppModel {
             catch is CancellationError { self.stoppedByUser = true; self.message = "Check stopped. Press “Check again” when you're ready." }
             catch is PhoneGone { self.message = "iPhone was disconnected. Plug it back in to continue." }
             catch { self.message = "Check stopped: \(error.localizedDescription)" }
-            self.saveHashCache()
+            self.saveStores()
             try? await self.driveIndex.save()
         }
     }
@@ -517,7 +521,7 @@ final class AppModel {
             for f in all { if let d = f.captureDate { byTime[Int(d.timeIntervalSince1970), default: []].append(f) } }
 
             // Kept drive copies count only while their bytes are unchanged: re-fingerprint each.
-            // ponytail: full re-read every check; skip when size+mtime match the kept file if kept videos make checks slow.
+            // Known limit: full re-read every check; skip when size+mtime match the kept file if kept videos make checks slow.
             let sizes = Dictionary(all.map { ($0.path, $0.size) }, uniquingKeysWith: { a, _ in a })
             var keptNow: [String: String] = [:]   // drive path → fingerprint now
             for item in media {
@@ -543,7 +547,7 @@ final class AppModel {
         var primaryHashes: [String: String] = [:]
         for b in bundles { if let h = knownHash(b.primary) { primaryHashes[b.id] = h } }
         var info: [String: CleanupInfo] = [:]
-        for b in bundles { if let j = jevCache[deviceKey(b.primary)] { info[b.id] = CleanupInfo(jev: j.verdict, jevConfidence: j.confidence) } }
+        for b in bundles { if let j = jevCache[deviceKey(b.primary)] { info[b.id] = CleanupInfo(jev: j.verdict) } }
         for group in Cleanup.exactDuplicates(hashes: primaryHashes) { for id in group { info[id, default: CleanupInfo()].duplicate = true } }
         try await findSimilar(into: &info)
         try Task.checkCancellation()
@@ -564,7 +568,7 @@ final class AppModel {
         var needed = Set<String>()
         for (i, b) in stills.enumerated() {
             for c in stills[(i + 1)...] {
-                if c.primary.captureDate!.timeIntervalSince(b.primary.captureDate!) > 600 { break }
+                if c.primary.captureDate!.timeIntervalSince(b.primary.captureDate!) > Cleanup.similarWindow { break }
                 needed.insert(b.id); needed.insert(c.id)
             }
         }
@@ -776,7 +780,7 @@ final class AppModel {
     /// One queue, so saves land in the order they were made and an older one can't overwrite a newer one.
     private static let saveQueue = DispatchQueue(label: "PhotoBackupChecker.save", qos: .utility)
 
-    private func saveHashCache() {
+    private func saveStores() {
         let dir = appData, hashes = hashCache, jev = jevCache, prints = printCache, bad = renders.counts, scores = scoreCache, picks = jevPicks, decided = decisions, said = answers
         Self.saveQueue.async {
             try? JSONStore.save(decided, to: dir.appendingPathComponent("settle-decisions.json"))
@@ -802,6 +806,8 @@ final class AppModel {
         return d
     }
 
+    private static let thumbMemoryLimit = 600
+
     /// Grid thumbnail: from memory, else the saved or fetched preview.
     func thumbnail(for item: PhoneItem) async -> CGImage? {
         let key = deviceKey(item)
@@ -810,7 +816,7 @@ final class AppModel {
               let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
         thumbMemory[key] = img
         thumbOrder.append(key)
-        if thumbOrder.count > 600 { thumbMemory[thumbOrder.removeFirst()] = nil }
+        if thumbOrder.count > Self.thumbMemoryLimit { thumbMemory[thumbOrder.removeFirst()] = nil }
         return img
     }
 
@@ -869,7 +875,7 @@ final class AppModel {
                 catch { self.message = (self.message ?? "") + " Couldn't write the receipt file." }
             }
             self.recomputeBundleStatuses()
-            self.saveHashCache()
+            self.saveStores()
             _ = try? await self.driveIndex.scan { _, _ in }
             try? await self.driveIndex.save()
         }
@@ -1059,7 +1065,7 @@ final class AppModel {
                 self.message = "Fixing stopped after \(replaced + added) item(s): \(Self.describe(error))"
             }
             self.recomputeBundleStatuses()
-            self.saveHashCache()
+            self.saveStores()
             _ = try? await self.driveIndex.scan { _, _ in }
             try? await self.driveIndex.save()
         }
@@ -1078,7 +1084,7 @@ final class AppModel {
     }
 
     /// Written straight away: an item already shown green must not lose its decision if the app quits mid-batch,
-    /// nor a Compare answer its answer. (Also saved with everything else in `saveHashCache`.)
+    /// nor a Compare answer its answer. (Also saved with everything else in `saveStores`.)
     private func saveDecisions() {
         let dir = appData, decided = decisions, said = answers
         Self.saveQueue.async {
@@ -1161,9 +1167,8 @@ final class AppModel {
             guard let self else { return }
             var deleted = 0, deletedUnbacked = 0, deletedTidy = 0, refused = 0
             var kept: [String] = []
-            let chosen = green
-            let macDeletes = chosen.filter { !$0.onlyPhoneCanDelete }
-            let handover = chosen.filter(\.onlyPhoneCanDelete)
+            let macDeletes = green.filter { !$0.onlyPhoneCanDelete }
+            let handover = green.filter(\.onlyPhoneCanDelete)
             let macOthers = others.filter { !$0.onlyPhoneCanDelete }
             var handoverOthers = others.filter(\.onlyPhoneCanDelete)
             let macTidy = tidy.filter { !$0.onlyPhoneCanDelete }
@@ -1173,7 +1178,7 @@ final class AppModel {
             var handoverNames: [String] = []
             var notUnique: [ItemBundle] = []
             do {
-                let media = chosen.flatMap(\.mediaMembers)
+                let media = green.flatMap(\.mediaMembers)
                 for (i, m) in media.enumerated() where self.sessionHashes[self.cacheKey(m)] == nil && self.keptDrive(m) == nil {
                     try Task.checkCancellation()
                     self.progress = Progress(label: "Re-checking photos and videos on iPhone before deleting", done: i, total: media.count)
@@ -1181,11 +1186,11 @@ final class AppModel {
                 }
                 // An edited version can stand in for its original only long enough to make a safe, separate copy.
                 // Once copied, the usual per-member delete gate below still checks every drive file again.
-                for (i, b) in chosen.enumerated() {
+                for (i, b) in green.enumerated() {
                     let originals = Matcher.unbackedOriginals(b.members.map { ($0, self.memberStatus[$0.id] ?? .none) })
                     for pair in originals {
                         try Task.checkCancellation()
-                        self.progress = Progress(label: "Copying originals to the drive before deleting", done: i, total: chosen.count)
+                        self.progress = Progress(label: "Copying originals to the drive before deleting", done: i, total: green.count)
                         let folder = URL(fileURLWithPath: pair.editedDrivePath).deletingLastPathComponent()
                         let name = Naming.originalName(besideEditedCopy: pair.editedDrivePath, ext: pair.original.ext)
                         do {
@@ -1268,7 +1273,7 @@ final class AppModel {
                             if case .verified(let path)? = self.memberStatus[item.id] { return path }
                             return nil
                         }.sorted().first
-                        self.logHandedOver(b, backedUpAt: backedUpAt)
+                        self.logDeleted(b, backedUpAt: backedUpAt, handedToPhone: true)
                     }
                 }
                 self.selection.subtract(macDeletedIDs)
@@ -1301,7 +1306,9 @@ final class AppModel {
             if !kept.isEmpty { lines.append("Kept some: " + kept.prefix(3).joined(separator: "; ")) }
             if receiptFailed { lines.append("Couldn't write the receipt file.") }
             self.message = lines.joined(separator: " ")
-            self.saveHashCache()
+            if !handoverNames.isEmpty { self.messageLinks.insert(.shortcut) }
+            if deleted + deletedUnbacked + deletedTidy > 0 || !handoverNames.isEmpty { self.messageLinks.insert(.deleteLog) }
+            self.saveStores()
         }
     }
 
@@ -1326,16 +1333,10 @@ final class AppModel {
     /// A plain record of every delete, kept on the Mac: when, which files, and whether a backup existed.
     var deleteLogURL: URL { appData.appendingPathComponent("deleted-from-iphone.txt") }
     /// `backedUpAt` is captured before the delete: afterwards the item is gone and has no status.
-    private func logDeleted(_ b: ItemBundle, backedUpAt path: String?) {
-        let where_ = path.map { "backed up at \($0)" } ?? "NOT backed up"
-        let line = "\(Date().formatted(.iso8601))\t\(b.members.map(\.name).joined(separator: " + "))\t\(where_)\n"
-        appendDeleteLog(line)
-    }
-
-    private func logHandedOver(_ b: ItemBundle, backedUpAt path: String?) {
-        let where_ = path.map { "backed up at \($0)" } ?? "NOT backed up"
-        let line = "\(Date().formatted(.iso8601))\t\(b.members.map(\.name).joined(separator: " + "))\thanded to iPhone, \(where_)\n"
-        appendDeleteLog(line)
+    private func logDeleted(_ b: ItemBundle, backedUpAt path: String?, handedToPhone: Bool = false) {
+        let backup = path.map { "backed up at \($0)" } ?? "NOT backed up"
+        let fate = handedToPhone ? "handed to iPhone, \(backup)" : backup
+        appendDeleteLog("\(Date().formatted(.iso8601))\t\(b.members.map(\.name).joined(separator: " + "))\t\(fate)\n")
     }
 
     private func appendDeleteLog(_ line: String) {
@@ -1364,13 +1365,12 @@ final class AppModel {
                     let data = try await self.resilient(drive: false, phone: true) { try await self.phone.fullData(id: b.primary.id) }
                     let (v, c) = try await Jev.classify(imageData: data, key: key)
                     self.cleanup[b.id, default: CleanupInfo()].jev = v
-                    self.cleanup[b.id, default: CleanupInfo()].jevConfidence = c
                     self.jevCache[self.deviceKey(b.primary)] = JevResult(verdict: v, confidence: c)
                     self.saveIfDue()
                 } catch is PhoneGone { self.message = "iPhone was disconnected."; break }
                 catch { failures += 1 }
             }
-            self.saveHashCache()
+            self.saveStores()
             if failures > 0 { self.message = "Jev couldn't check \(failures) screenshot(s)." }
             else if self.message == nil { self.message = "Checked \(shots.count) screenshot(s) with Jev." }
         }

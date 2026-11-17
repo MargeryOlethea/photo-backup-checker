@@ -39,8 +39,6 @@ func indexTests() async {
     let hashed = (try? await idx.ensureHashes(forSizes: [Int64(a.count)])) ?? []
     check(hashed.first { $0.path.hasSuffix("a.jpg") }?.sha256 == hex(a), "hashes matching size")
     check(hashed.first { $0.path.hasSuffix("b.mov") }?.sha256 == nil, "skips non-matching size")
-    let sameSize = await idx.files(withSize: Int64(a.count))
-    check(sameSize.count == 1, "files(withSize:)")
     try? await idx.save()
 
     // Cache reuse: change bytes, keep size + mtime -> cached hash survives (proves no re-read).

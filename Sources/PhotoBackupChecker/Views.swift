@@ -3,13 +3,13 @@ import AppKit
 import AVKit
 import Core
 
-private func gb(_ b: Int64) -> String { ByteCountFormatter.string(fromByteCount: b, countStyle: .file) }
+private func sizeText(_ b: Int64) -> String { ByteCountFormatter.string(fromByteCount: b, countStyle: .file) }
 private func mp(_ w: Int?, _ h: Int?) -> String? {
     guard let w, let h, w > 0, h > 0 else { return nil }
     let m = Double(w * h) / 1_000_000
     return String(format: m < 10 ? "%.1f MP" : "%.0f MP", m)
 }
-private enum Radius { static let card: CGFloat = 12, tile: CGFloat = 8, badge: CGFloat = 4 }
+private enum Radius { static let card: CGFloat = 12, tile: CGFloat = 8, thumb: CGFloat = 6, badge: CGFloat = 4 }
 
 private extension Color {
     /// The app's highlight colour: the plum from the icon, lighter in dark mode so it stays readable.
@@ -76,11 +76,11 @@ struct ContentView: View {
         let _ = model.phoneState
         VStack(spacing: 0) {
             StatusStrip(model: model)
-            if model.bundles.isEmpty && model.phone.deviceName == nil {
+            if model.bundles.isEmpty && model.phone.connection == .unplugged {
                 placeholder("iphone.gen3", "Plug in your iPhone", "Use the cable, unlock the phone and tap Trust if it asks.")
-            } else if model.bundles.isEmpty && model.phone.isLocked {
+            } else if model.bundles.isEmpty && model.phone.connection == .locked {
                 placeholder("lock.iphone", "Unlock your iPhone", "The app continues as soon as the phone is unlocked.")
-            } else if model.bundles.isEmpty && !model.phone.catalogReady {
+            } else if model.bundles.isEmpty && model.phone.connection == .reading {
                 placeholder("photo.on.rectangle.angled", "Reading your iPhone…", "This takes a few seconds.", spinner: true)
             } else {
                 if model.showsBackup { SummaryCards(model: model) }
@@ -117,12 +117,19 @@ struct ContentView: View {
     }
 
     private var phoneText: String {
-        if model.phone.deviceName == nil { return "Unplugged" }
-        if model.phone.isLocked { return "Locked" }
-        return model.phone.catalogReady ? "Connected" : "Reading…"
+        switch model.phone.connection {
+        case .unplugged: "Unplugged"
+        case .locked: "Locked"
+        case .reading: "Reading…"
+        case .connected: "Connected"
+        }
     }
     private var phoneColor: Color {
-        model.phone.deviceName == nil ? .red : model.phone.isLocked || !model.phone.catalogReady ? .orange : .green
+        switch model.phone.connection {
+        case .unplugged: .red
+        case .locked, .reading: .orange
+        case .connected: .green
+        }
     }
 
     private func placeholder(_ icon: String, _ title: String, _ detail: String, spinner: Bool = false) -> some View {
@@ -200,7 +207,7 @@ struct StatusStrip: View {
             }
             if let p = model.progress {
                 HStack(spacing: 10) {
-                    if p.total > 0 { ProgressView(value: Double(p.done), total: Double(max(p.total, 1))).frame(maxWidth: 260) }
+                    if p.total > 0 { ProgressView(value: Double(p.done), total: Double(p.total)).frame(maxWidth: 260) }
                     else { ProgressView().controlSize(.small) }
                     Text(p.total > 0 ? "\(p.label) · \(p.done) of \(p.total)" : p.label).font(.callout).monospacedDigit()
                     Spacer()
@@ -223,8 +230,8 @@ struct StatusStrip: View {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "info.circle.fill").foregroundStyle(.tint)
                     Text(m).font(.callout).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
-                    if m.contains("Shortcut") { ShortcutLink(title: "Get the Shortcut") }
-                    if m.hasPrefix("Deleted") {
+                    if model.messageLinks.contains(.shortcut) { ShortcutLink(title: "Get the Shortcut") }
+                    if model.messageLinks.contains(.deleteLog) {
                         Button("Show list") { NSWorkspace.shared.open(model.deleteLogURL) }.buttonStyle(.borderless)
                     }
                     Button { model.message = nil } label: { Image(systemName: "xmark") }.buttonStyle(.borderless).help("Dismiss")
@@ -270,7 +277,7 @@ struct SummaryCards: View {
                 .font(.callout.weight(.medium))
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("\(n)").font(.system(size: 26, weight: .semibold, design: .rounded)).monospacedDigit()
-                    Text(gb(bytes)).foregroundStyle(.secondary)
+                    Text(sizeText(bytes)).foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                     if let action {
                         Button(action.0, action: action.1).controlSize(.small).buttonStyle(.bordered).tint(c == .secondary ? .plum : c)
@@ -354,7 +361,7 @@ struct SelectionBar: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Text("\(model.selection.count) selected").font(.headline)
-                Text(gb(model.selectedBytes)).foregroundStyle(.secondary)
+                Text(sizeText(model.selectedBytes)).foregroundStyle(.secondary)
                 Button("Clear") { model.selection = [] }.buttonStyle(.borderless).keyboardShortcut(.escape, modifiers: [])
                     .help("Clear the selection (Esc)")
                 Spacer()
@@ -429,7 +436,7 @@ struct DeleteSheet: View {
         ].compactMap { $0 }
         let deleteTitle = deleteParts.joined(separator: " · ") + (unbacked.isEmpty ? "" : " forever")
         VStack(alignment: .leading, spacing: 14) {
-            Label("Delete \(all.count) item\(all.count == 1 ? "" : "s") (\(gb(all.reduce(0) { $0 + $1.totalSize }))) from your iPhone?", systemImage: "trash")
+            Label("Delete \(all.count) item\(all.count == 1 ? "" : "s") (\(sizeText(all.reduce(0) { $0 + $1.totalSize }))) from your iPhone?", systemImage: "trash")
                 .font(.title3.weight(.semibold))
             if !green.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
@@ -453,7 +460,7 @@ struct DeleteSheet: View {
                     Label("\(unbacked.count) \(unbacked.count == 1 ? "is" : "are") NOT backed up. \(unbacked.count == 1 ? "It" : "They") will be gone forever.", systemImage: "exclamationmark.triangle.fill")
                         .font(.headline).foregroundStyle(.red)
                     if possible > 0 {
-                        Text("\(possible) of these \(possible == 1 ? "has" : "have") a similar file on the drive that isn't identical. Consider “Review possible copies” first.")
+                        Text("\(possible) of these \(possible == 1 ? "has" : "have") a similar file on the drive that isn't identical. Consider “Fix possible copies” first.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
                     rows(unbacked)
@@ -524,7 +531,7 @@ struct Thumb: View {
     @State private var image: CGImage?
     var body: some View {
         Group { if let image { Image(decorative: image, scale: 1).resizable().scaledToFill() } else { Rectangle().fill(.quaternary) } }
-            .frame(width: side, height: side).clipShape(RoundedRectangle(cornerRadius: 6))
+            .frame(width: side, height: side).clipShape(RoundedRectangle(cornerRadius: Radius.thumb))
             .task(id: item.id) { image = await model.thumbnail(for: item) }
     }
 }
@@ -763,7 +770,7 @@ struct TileView: View {
         .scaleEffect(hover ? 1.02 : 1)
         .animation(.easeOut(duration: 0.12), value: hover)
         .onHover { hover = $0 }
-        .help([bundle.primary.name, bundle.primary.captureDate?.formatted(date: .abbreviated, time: .shortened), gb(bundle.totalSize), status?.label,
+        .help([bundle.primary.name, bundle.primary.captureDate?.formatted(date: .abbreviated, time: .shortened), sizeText(bundle.totalSize), status?.label,
                bundle.onlyPhoneCanDelete ? "Deleted via the iPhone Shortcut" : "Deleted by the Mac"]
             .compactMap { $0 }.joined(separator: " · "))
         .task(id: bundle.id) { image = await model.thumbnail(for: bundle.primary) }
@@ -810,8 +817,8 @@ struct PreviewView: View {
         VStack(spacing: 12) {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(bundle.members.filter { !$0.isSidecar }.map(\.name).joined(separator: " + ")).font(.headline)
-                    Text([bundle.primary.captureDate?.formatted(date: .long, time: .shortened), mp(bundle.primary.pixelWidth, bundle.primary.pixelHeight), gb(bundle.totalSize)]
+                    Text(bundle.mediaMembers.map(\.name).joined(separator: " + ")).font(.headline)
+                    Text([bundle.primary.captureDate?.formatted(date: .long, time: .shortened), mp(bundle.primary.pixelWidth, bundle.primary.pixelHeight), sizeText(bundle.totalSize)]
                         .compactMap { $0 }.joined(separator: " · ")).font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -891,7 +898,7 @@ struct BackupSheet: View {
         let todo = model.selectedUnbacked
         let skipped = model.selection.count - todo.count
         VStack(alignment: .leading, spacing: 14) {
-            Label("Back up \(todo.count) item\(todo.count == 1 ? "" : "s") · \(gb(todo.reduce(0) { $0 + $1.totalSize }))", systemImage: "externaldrive.badge.plus")
+            Label("Back up \(todo.count) item\(todo.count == 1 ? "" : "s") · \(sizeText(todo.reduce(0) { $0 + $1.totalSize }))", systemImage: "externaldrive.badge.plus")
                 .font(.title3.weight(.semibold))
             if skipped > 0 {
                 Text("\(skipped) of the selected item\(skipped == 1 ? " is" : "s are") already backed up and will be skipped.")
@@ -968,8 +975,6 @@ struct SettleSheet: View {
     @State private var lastCompared: String?   // the list comes back scrolled to this row, not to the top
     @State private var loaded = false
 
-    private func action(_ r: SettleRow) -> Settle.Action? { r.action }
-
     var body: some View {
         Group {
             if let r = reconciling {
@@ -988,8 +993,8 @@ struct SettleSheet: View {
     private var list: some View {
         let rows = model.settleRows
         let comparing = rows.filter { $0.verdict == nil }.count
-        let todo = rows.filter { !leftOut.contains($0.id) }.compactMap { r in action(r).map { (r.id, $0) } }
-        let unsure = rows.filter { $0.verdict != nil && action($0) == nil }.count
+        let todo = rows.filter { !leftOut.contains($0.id) }.compactMap { r in r.action.map { (r.id, $0) } }
+        let unsure = rows.filter { $0.verdict != nil && $0.action == nil }.count
         return VStack(alignment: .leading, spacing: 12) {
             Text("Fix possible copies").font(.title3.weight(.semibold))
             Text("The drive has a file that looks like each of these iPhone photos and videos but isn't identical. Where the iPhone's is better, it replaces the drive copy (the old one goes to the drive's Trash). Where the drive's is better, that copy is kept and the item turns green. Where the app isn't sure, press “Compare” and decide yourself.")
@@ -1025,7 +1030,7 @@ struct SettleSheet: View {
     }
 
     @ViewBuilder private func row(_ r: SettleRow) -> some View {
-        let a = action(r)
+        let a = r.action
         HStack(spacing: 12) {
             Toggle("", isOn: Binding(get: { a != nil && !leftOut.contains(r.id) },
                                      set: { if $0 { leftOut.remove(r.id) } else { leftOut.insert(r.id) } }))
@@ -1036,7 +1041,7 @@ struct SettleSheet: View {
             Spacer()
             VStack(alignment: .trailing, spacing: 4) {
                 if r.verdict == nil { ProgressView().controlSize(.small) }
-                else if let a { Label(Self.consequence(a, r), systemImage: Self.icon(a)).foregroundStyle(a == .different ? Color.secondary : .green).lineLimit(1) }
+                else if let a { Label(Self.consequence(a), systemImage: Self.icon(a)).foregroundStyle(a == .different ? Color.secondary : .green).lineLimit(1) }
                 else { Label("Not sure: compare them", systemImage: "questionmark.circle").foregroundStyle(.orange).lineLimit(1) }
                 if r.verdict != nil {
                     Button(a == nil ? "Compare…" : "Compare again…") { reconciling = r }
@@ -1048,7 +1053,7 @@ struct SettleSheet: View {
         .padding(.vertical, 4)
     }
 
-    static func consequence(_ a: Settle.Action, _ r: SettleRow) -> String {
+    static func consequence(_ a: Settle.Action) -> String {
         switch a {
         case .replace: "Replace with the iPhone original"
         case .keepDrive: "Keep the drive's copy"
@@ -1083,7 +1088,7 @@ private struct SettleSide: View {
                 Text(phone ? "iPhone" : "Drive").font(.callout.weight(.semibold))
                 if best { Text("better").font(.caption2.weight(.bold)).padding(.horizontal, 4).background(.green.opacity(0.25), in: Capsule()) }
             }
-            Text([format, detail, gb(phone ? r.item.size : r.drive.size)].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+            Text([format, detail, sizeText(phone ? r.item.size : r.drive.size)].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
             Text(name).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
         }
         let pic = Group {
@@ -1098,7 +1103,7 @@ private struct SettleSide: View {
             }
         } else {
             HStack(spacing: 8) {
-                pic.frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: 6))
+                pic.frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: Radius.thumb))
                 info.frame(width: 170, alignment: .leading)
             }
         }
@@ -1157,7 +1162,7 @@ struct ReadyToDeleteView: View {
                 .font(.callout).foregroundStyle(.secondary)
             List(ready) { b in
                 HStack {
-                    Text(b.members.filter { !$0.isSidecar }.map(\.name).joined(separator: ", "))
+                    Text(b.mediaMembers.map(\.name).joined(separator: ", "))
                     Spacer()
                     Text(b.primary.captureDate.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "").foregroundStyle(.secondary)
                 }
