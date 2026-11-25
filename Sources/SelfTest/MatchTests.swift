@@ -15,9 +15,14 @@ func matchTests() {
     check(live.first?.primary.name == "IMG_0010.HEIC", "Live primary is the photo")
 
     let edited = Bundler.bundles([item("IMG_0001.HEIC"), item("IMG_E0001.HEIC"), item("IMG_0001.AAE", uti: "com.apple.photos.aae", sidecar: true)])
-    check(edited.count == 1 && edited[0].kind == .edited, "edited trio is one bundle")
+    check(edited.count == 1 && edited[0].kind == .single && edited[0].members.count == 3, "edited trio is one bundle")
+    check(edited.first?.mediaMembers.map(\.name) == ["IMG_0001.HEIC"], "only the unedited photo counts as the photo")
     check(edited.first?.primary.name == "IMG_0001.HEIC", "edited primary is the original")
-    check(edited.first?.members.filter(\.isSidecar).count == 1, "AAE kept as sidecar member")
+    check(edited.first?.members.filter(\.isSidecar).count == 2, "AAE and edited version ride along as sidecars")
+    let loneEdit = Bundler.bundles([item("IMG_E0002.HEIC")])
+    check(loneEdit.first?.mediaMembers.count == 1, "an edited version without its original on the iPhone is still a photo")
+    let stillOnly = Bundler.bundles([item("IMG_0003.HEIC"), item("IMG_E0003.MOV", uti: "com.apple.quicktime-movie")])
+    check(stillOnly.flatMap(\.mediaMembers).contains { $0.name == "IMG_E0003.MOV" }, "an edited video whose unedited video is missing is still backed up")
 
     let burst = Bundler.bundles([item("IMG_0100.JPG", burst: "B"), item("IMG_0101.JPG", burst: "B"), item("IMG_0102.JPG", burst: "B")])
     check(burst.count == 1 && burst[0].kind == .burst && burst[0].members.count == 3, "burst of 3 is one bundle")
@@ -61,18 +66,4 @@ func matchTests() {
           "unmatched AAE does not block verified")
     check(Matcher.bundleStatus([(photo, .none), (movie, .none)]) == .none, "nothing matched is none")
 
-    let original = item("IMG_1234.HEIC")
-    let editedVersion = item("IMG_E1234.HEIC")
-    let editedOnly = [(original, Status.none), (editedVersion, .verified(drivePath: "/d/IMG_1234 edited.HEIC"))]
-    check(Matcher.bundleStatus(editedOnly) == .verified(drivePath: "/d/IMG_1234 edited.HEIC"), "verified edited version covers its original")
-    let originals = Matcher.unbackedOriginals(editedOnly)
-    check(originals.count == 1 && originals[0].original == original && originals[0].editedDrivePath == "/d/IMG_1234 edited.HEIC", "edited version identifies original to copy")
-    if case .possible = Matcher.bundleStatus([(original, .verified(drivePath: "/d/original")), (editedVersion, .none)]) { check(true, "") }
-    else { check(false, "verified original with missing edited version stays possible") }
-    check(!Matcher.isDeletable(Matcher.bundleStatus(editedOnly + [(movie, .none)])), "unverified Live Photo video blocks edited-version exception")
-    let differentOriginal = item("IMG_5678.HEIC")
-    check(!Matcher.isDeletable(Matcher.bundleStatus([(differentOriginal, .none), (editedVersion, .verified(drivePath: "/d/edit"))])), "different original stem is not covered")
-    let allVerified = [(original, Status.verified(drivePath: "/d/original")), (editedVersion, .verified(drivePath: "/d/edit"))]
-    check(Matcher.bundleStatus(allVerified) == .verified(drivePath: "/d/original") && Matcher.unbackedOriginals(allVerified).isEmpty,
-          "fully verified edited bundle needs no original copy")
 }

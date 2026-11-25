@@ -9,7 +9,7 @@ func hangTests() {
     check(p("ECEIE5383.JPG").isEditedRender && p("DSCFE0019.JPG").isEditedRender, "XXXXE files are edited versions")
     check(!p("ECEI5383.JPG").isEditedRender && !p("BOS04114.JPEG").isEditedRender && !p("IMG_0001E.HEIC").isEditedRender, "other names are not edited versions")
     let photo = Bundler.bundles([p("ECEI5383.JPG"), p("ECEIE5383.JPG")])
-    check(photo.count == 1 && photo[0].kind == .edited && photo[0].primary.name == "ECEI5383.JPG", "XXXX original and its edited version are one photo")
+    check(photo.count == 1 && photo[0].primary.name == "ECEI5383.JPG", "XXXX original and its edited version are one photo")
     let mov = "com.apple.quicktime-movie"
     let clip = Bundler.bundles([PhoneItem(id: "DCIM/1/DGKX8273.MP4", name: "DGKX8273.MP4", size: 1, uti: "public.mpeg-4"),
                                 PhoneItem(id: "DCIM/1/DGKXE8273.MOV", name: "DGKXE8273.MOV", size: 1, uti: mov)])

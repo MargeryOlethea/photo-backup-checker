@@ -92,7 +92,7 @@ PBC_DEMO_PHONE=~/pbc-demo/phone PBC_DEMO_DRIVE=~/pbc-demo/drive .build/debug/Pho
 
 ## In the app
 
-Badges: `Live`, `Edited`, `Burst` (several files shown as one), `Duplicate`, `Similar`, and `Probably junk` / `Probably keep` / `Not sure` for screenshots (optional, see below).
+Badges: `Live`, `Burst` (several files shown as one), `Duplicate`, `Similar`, and `Probably junk` / `Probably keep` / `Not sure` for screenshots (optional, see below).
 
 <details>
 <summary><b>Backing up</b></summary>

@@ -91,7 +91,7 @@ public enum Status: Hashable, Sendable {
 
 /// What the grid shows as one tile: a single file, or files the phone treats as one photo.
 public struct ItemBundle: Identifiable, Hashable, Sendable {
-    public enum Kind: String, Sendable { case single, live, edited, burst }
+    public enum Kind: String, Sendable { case single, live, burst }
     public var id: String
     public var primary: PhoneItem
     public var members: [PhoneItem]   // includes primary and sidecars
@@ -103,7 +103,7 @@ public struct ItemBundle: Identifiable, Hashable, Sendable {
 
     public var totalSize: Int64 { members.reduce(0) { $0 + $1.size } }
     public var mediaMembers: [PhoneItem] { members.filter { !$0.isSidecar } }
-    /// What can be read from the iPhone: everything but a burst shot's edited version (see `Bundler`).
+    /// What is read, checked and backed up: everything but an edited version that rides along with its original (see `Bundler`).
     public var readableMembers: [PhoneItem] { members.filter { !($0.isSidecar && $0.isEditedRender) } }
     /// The iPhone refuses to delete photos with an edited version from a Mac (answers "deleted", keeps them),
     /// and deleting videos from the Mac fails too: both go to the iPhone Shortcut.

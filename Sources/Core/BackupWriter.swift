@@ -72,10 +72,7 @@ public enum BackupWriter {
             for m in b.mediaMembers where b.kind == .burst { numberForStem[m.stem] = numbers.next() }
             for m in b.readableMembers {
                 let n = shared ?? numberForStem[m.stem] ?? numberForStem.values.min() ?? 1
-                var dest = Naming.fileName(label: label, number: n, ext: m.ext)
-                if m.isEditedRender {
-                    dest = Naming.fileName(label: label, number: n, ext: "").appending(" edited") + (m.ext.isEmpty ? "" : "." + m.ext)
-                }
+                let dest = Naming.fileName(label: label, number: n, ext: m.ext)
                 out.append(PlannedCopy(item: m, destName: dest, bundleID: b.id, bundleMembers: names))
             }
         }

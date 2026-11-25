@@ -4,12 +4,15 @@ import Foundation
 /// When the phone's own grouping signals disagree, files stay separate rather than merged on a guess.
 public enum Bundler {
     public static func bundles(_ items: [PhoneItem]) -> [ItemBundle] {
-        // A burst shot's edited version: the iPhone lists it but never hands it over (asking jams the connection).
-        // It rides along with its burst like an .AAE, so it is shown, deleted and handed over with it, never read.
-        let burstStems = Set(items.filter { $0.burstUUID != nil && !$0.isSidecar }.map { $0.folder + "/" + $0.stem })
-        func burstEdit(_ i: PhoneItem) -> Bool { i.isEditedRender && (i.burstUUID != nil || burstStems.contains(i.folder + "/" + i.stem)) }
-        let media = items.filter { !$0.isSidecar && !burstEdit($0) }
-        let sidecars = items.filter(\.isSidecar) + items.filter { !$0.isSidecar && burstEdit($0) }.map { var s = $0; s.isSidecar = true; return s }
+        // Only the unedited (uncropped) version is backed up. An edited version whose original is on the iPhone,
+        // and every burst shot's edited version (asking for one jams the connection), rides along with its photo
+        // like an .AAE: shown, deleted and handed over with it, never read, checked or copied.
+        // An edited video pairs with an unedited video, an edited still with an unedited still.
+        func key(_ i: PhoneItem) -> String { "\(i.folder)/\(i.stem)/\(i.isVideo)" }
+        let originals = Set(items.filter { !$0.isSidecar && !$0.isEditedRender }.map(key))
+        func ridesAlong(_ i: PhoneItem) -> Bool { i.isEditedRender && (i.burstUUID != nil || originals.contains(key(i))) }
+        let media = items.filter { !$0.isSidecar && !ridesAlong($0) }
+        let sidecars = items.filter(\.isSidecar) + items.filter { !$0.isSidecar && ridesAlong($0) }.map { var s = $0; s.isSidecar = true; return s }
 
         var groups: [[PhoneItem]] = []
         // Bursts first: same burst id.
@@ -47,8 +50,6 @@ public enum Bundler {
             kind = .single; primary = g[0]
         } else if g.contains(where: { $0.burstUUID != nil }) {
             kind = .burst; primary = sorted[0]
-        } else if g.contains(where: \.isEditedRender) {
-            kind = .edited; primary = sorted.first { !$0.isEditedRender && !$0.isVideo } ?? sorted[0]
         } else if g.contains(where: \.isVideo) && g.contains(where: { !$0.isVideo }) {
             kind = .live; primary = sorted.first { !$0.isVideo }!
         } else {
