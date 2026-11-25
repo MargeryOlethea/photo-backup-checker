@@ -6,7 +6,7 @@ func edge2Tests() async {
     check(Naming.existingNumbers(label: "Bali", in: ["Bali 01 edited.HEIC"]) == [1], "edited file name counts for numbering")
     func p(_ n: String) -> PhoneItem { PhoneItem(id: "DCIM/1/\(n)", name: n, size: 1, captureDate: Date(timeIntervalSince1970: 1), uti: "public.heic") }
     let plan = (try? BackupWriter.plan(bundles: Bundler.bundles([p("IMG_E0002.HEIC")]), folderName: "Bali", existingNames: ["Bali 01 edited.HEIC"]))?.map(\.destName) ?? []
-    check(plan == ["Bali 02 edited.HEIC"], "edit after existing edit takes next number (got \(plan))")
+    check(plan == ["Bali 02.HEIC"], "an edited version with no original on the iPhone is backed up, after the existing numbers (got \(plan))")
 
     // Delete gate refuses a tile with no photo/video in it.
     let aae = PhoneItem(id: "DCIM/1/IMG_9.AAE", name: "IMG_9.AAE", size: 1, uti: "com.apple.photos.aae", isSidecar: true)

@@ -13,7 +13,7 @@ func edgeTests() async {
     check(Naming.existingNumbers(label: "Bali", in: ["Bali 07"]) == [7], "numbered file without extension counts")
     check(Naming.nextNumbers(count: 2, label: "Bali", existing: ["Bali 99.JPG"]) == [100, 101], "99 rolls to 100")
 
-    // Bundler / plan: edited Live photo keeps four distinct names
+    // Bundler / plan: an edited Live photo backs up only its unedited photo and video
     func p(_ n: String, group: String? = "G", uti: String = "public.heic") -> PhoneItem {
         PhoneItem(id: "DCIM/100APPLE/\(n)", name: n, size: 5, captureDate: Date(timeIntervalSince1970: 10), uti: uti, groupUUID: group)
     }
@@ -21,7 +21,7 @@ func edgeTests() async {
     let editedLive = Bundler.bundles([p("IMG_0001.HEIC"), p("IMG_0001.MOV", uti: mov), p("IMG_E0001.HEIC"), p("IMG_E0001.MOV", uti: mov)])
     check(editedLive.count == 1 && editedLive[0].primary.name == "IMG_0001.HEIC", "edited Live photo is one tile, original first")
     let names = (try? BackupWriter.plan(bundles: editedLive, folderName: "Bali", existingNames: []))?.map(\.destName) ?? []
-    check(Set(names).count == 4, "edited Live photo gets 4 distinct names (got \(names))")
+    check(names == ["Bali 01.HEIC", "Bali 01.MOV"], "edited Live photo backs up only the unedited pair (got \(names))")
 
     let lone = Bundler.bundles([PhoneItem(id: "DCIM/1/IMG_9.AAE", name: "IMG_9.AAE", size: 1, uti: "com.apple.photos.aae", isSidecar: true)])
     check(lone.count == 1 && !Matcher.isDeletable(Matcher.bundleStatus(lone[0].members.map { ($0, .none) })), "lone edit file is never deletable")

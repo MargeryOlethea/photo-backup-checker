@@ -54,7 +54,7 @@ func deleteGateTests() async {
 
     let original = PhoneItem(id: "DCIM/100APPLE/IMG_2245.HEIC", name: "IMG_2245.HEIC", size: 1, uti: "public.heic")
     let edited = PhoneItem(id: "DCIM/100APPLE/IMG_E2245.HEIC", name: "IMG_E2245.HEIC", size: 1, uti: "public.heic")
-    let cameraBundle = ItemBundle(id: original.id, primary: original, members: [original, edited], kind: .edited)
+    let cameraBundle = ItemBundle(id: original.id, primary: original, members: [original, edited], kind: .single)
     let png = PhoneItem(id: "DCIM/100APPLE/IMAGE.PNG", name: "IMAGE.PNG", size: 1, uti: "public.png")
     let pngBundle = ItemBundle(id: png.id, primary: png, members: [png], kind: .single)
     check(cameraBundle.onlyPhoneCanDelete, "edited-version bundle can only be deleted by the iPhone")

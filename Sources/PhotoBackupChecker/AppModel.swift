@@ -988,7 +988,7 @@ final class AppModel {
                     self.progress = Progress(label: "Fixing possible copies", done: i, total: rows.count)
                     // What has to come from the iPhone. An edited version it can't make jams the connection on every
                     // try, so it gets one try, ever (`RenderTries`); a row that needs a given-up one is skipped.
-                    let fromPhone = r.bundle.members.filter { m in
+                    let fromPhone = r.bundle.readableMembers.filter { m in
                         if m.id == r.item.id { return action == .replace || action == .keepBoth }
                         if case .verified? = self.memberStatus[m.id] { return false }
                         return true
@@ -1037,7 +1037,7 @@ final class AppModel {
                             added += 1
                         }
                         // The rest of the bundle (a Live Photo's video, an .AAE edit file) goes next to the photo, unless the drive already has that exact file.
-                        for m in r.bundle.members where m.id != r.item.id {
+                        for m in r.bundle.readableMembers where m.id != r.item.id {
                             if case .verified? = self.memberStatus[m.id] { continue }
                             reading = m
                             let e = try await self.copyAlongside(m, old: URL(fileURLWithPath: primaryPath), bundle: r.bundle, into: folder)
@@ -1172,8 +1172,6 @@ final class AppModel {
             let macOthers = others.filter { !$0.onlyPhoneCanDelete }
             var handoverOthers = others.filter(\.onlyPhoneCanDelete)
             let macTidy = tidy.filter { !$0.onlyPhoneCanDelete }
-            var receiptEntries: [URL: [ReceiptEntry]] = [:]
-            var skipped = Set<String>()
             var macDeletedIDs = Set<String>()
             var handoverNames: [String] = []
             var notUnique: [ItemBundle] = []
@@ -1184,36 +1182,8 @@ final class AppModel {
                     self.progress = Progress(label: "Re-checking photos and videos on iPhone before deleting", done: i, total: media.count)
                     _ = try await self.resilient(drive: false, phone: true) { try await self.hash(m, fresh: true) }
                 }
-                // An edited version can stand in for its original only long enough to make a safe, separate copy.
-                // Once copied, the usual per-member delete gate below still checks every drive file again.
-                for (i, b) in green.enumerated() {
-                    let originals = Matcher.unbackedOriginals(b.members.map { ($0, self.memberStatus[$0.id] ?? .none) })
-                    for pair in originals {
-                        try Task.checkCancellation()
-                        self.progress = Progress(label: "Copying originals to the drive before deleting", done: i, total: green.count)
-                        let folder = URL(fileURLWithPath: pair.editedDrivePath).deletingLastPathComponent()
-                        let name = Naming.originalName(besideEditedCopy: pair.editedDrivePath, ext: pair.original.ext)
-                        do {
-                            let entry = try await self.resilient(drive: true, phone: true) {
-                                let job = CopyJob(item: pair.original, destName: name, bundleID: b.id,
-                                                  bundleMembers: b.members.map(\.name), read: self.phone.reader(id: pair.original.id))
-                                return try await BackupWriter.copy(job, into: folder)
-                            }
-                            self.markVerified(pair.original, hash: entry.sha256, path: folder.appendingPathComponent(name).path)
-                            receiptEntries[folder, default: []].append(entry)
-                        } catch is CancellationError {
-                            throw CancellationError()
-                        } catch is PhoneGone {
-                            throw PhoneGone()
-                        } catch {
-                            skipped.insert(b.id)
-                            kept.append("original couldn't be copied to the drive: \(pair.original.name) (\(Self.describe(error)))")
-                            break
-                        }
-                    }
-                }
                 // One tile at a time: check its drive copies again, then delete it straight away.
-                let readyToDelete = macDeletes.filter { !skipped.contains($0.id) }
+                let readyToDelete = macDeletes
                 for (i, b) in readyToDelete.enumerated() {
                     try Task.checkCancellation()
                     self.progress = Progress(label: "Deleting from iPhone", done: i, total: readyToDelete.count)
@@ -1264,7 +1234,7 @@ final class AppModel {
                     if let why = await self.duplicateGate(b, leaving: leaving) { kept.append(why) } else { handoverOthers.append(b) }
                 }
                 let handedOver = PhoneDelete.handoverList(
-                    (handover + handoverOthers).filter { !skipped.contains($0.id) }, allPhoneItems: self.phone.items)
+                    handover + handoverOthers, allPhoneItems: self.phone.items)
                 if !handedOver.names.isEmpty {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(handedOver.names.joined(separator: "\n"), forType: .string)
@@ -1286,11 +1256,6 @@ final class AppModel {
             } catch {
                 kept.append(Self.describe(error))
             }
-            var receiptFailed = false
-            for (folder, entries) in receiptEntries where !entries.isEmpty {
-                do { try BackupWriter.appendReceipt(entries, folder: folder) }
-                catch { receiptFailed = true }
-            }
             var lines: [String] = []
             if deleted + deletedUnbacked + deletedTidy > 0 {
                 lines.append("Deleted \(deleted + deletedUnbacked + deletedTidy) item(s) from your iPhone" + (deletedUnbacked > 0 ? " (\(deletedUnbacked) weren't backed up)." : "."))
@@ -1304,7 +1269,6 @@ final class AppModel {
             }
             if refused > 0 { lines.append("iPhone didn't delete \(refused).") }
             if !kept.isEmpty { lines.append("Kept some: " + kept.prefix(3).joined(separator: "; ")) }
-            if receiptFailed { lines.append("Couldn't write the receipt file.") }
             self.message = lines.joined(separator: " ")
             if !handoverNames.isEmpty { self.messageLinks.insert(.shortcut) }
             if deleted + deletedUnbacked + deletedTidy > 0 || !handoverNames.isEmpty { self.messageLinks.insert(.deleteLog) }

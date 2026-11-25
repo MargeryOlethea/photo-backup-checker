@@ -49,6 +49,8 @@ func burstEditTests() {
         let plan = (try? BackupWriter.plan(bundles: [burst], folderName: "2026-09 Trip", existingNames: [])) ?? []
         check(plan.count == 3 && !plan.contains(where: { $0.item.isEditedRender }), "backing up a burst copies its originals and .AAE, not its edited shots")
     }
-    let edited = bundles.first { $0.kind == .edited }
-    check(edited?.readableMembers.contains(where: \.isEditedRender) == true, "an ordinary edited photo still backs up its edited version")
+    let edited = bundles.first { $0.primary.name == "IMG_3000.JPG" }
+    check(edited?.members.count == 2 && edited?.readableMembers.contains(where: \.isEditedRender) == false, "an ordinary edited photo stays one photo but its edited version is never read")
+    let plan = (try? BackupWriter.plan(bundles: edited.map { [$0] } ?? [], folderName: "2026-09 Trip", existingNames: [])) ?? []
+    check(plan.map(\.destName) == ["Trip 01.JPG"], "backing up an edited photo copies only the unedited version")
 }
