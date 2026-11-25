@@ -15,9 +15,12 @@ public enum Cleanup {
         Set(groups.compactMap { g in g.allSatisfy(selected.contains) ? g.first : nil })
     }
 
+    /// Shots taken further apart than this (seconds) are never compared as similar.
+    public static let similarWindow: TimeInterval = 600
+
     /// Similar shots: taken within `window` seconds of each other and visually close, or in the same burst.
     public static func similarGroups(items: [PhoneItem], distance: (String, String) -> Float?,
-                                     threshold: Float = 0.35, window: TimeInterval = 600) -> [[String]] {
+                                     threshold: Float = 0.35, window: TimeInterval = similarWindow) -> [[String]] {
         var seen = Set<String>()
         let sorted = items.filter { $0.captureDate != nil && seen.insert($0.id).inserted }.sorted { $0.captureDate! < $1.captureDate! }
         var parent = Dictionary(uniqueKeysWithValues: sorted.map { ($0.id, $0.id) })
